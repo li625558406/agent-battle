@@ -294,6 +294,72 @@ func (c *Client) Profile(name string) ([]StoredProfile, error) {
 	return out.Profiles, nil
 }
 
+// ReviewSideOut 复盘单侧概要。
+type ReviewSideOut struct {
+	Agent     string `json:"agent"`
+	Passed    int    `json:"passed"`
+	Total     int    `json:"total"`
+	WallMS    int64  `json:"wall_ms"`
+	HasEvents bool   `json:"has_events"`
+}
+
+// ReviewTlEvent 复盘时间线事件（runner 不能导入 platform/internal/review
+// ——internal 边界，本地定义最小解析形态，与平台侧 JSON 契约对齐）。
+type ReviewTlEvent struct {
+	Seq        int    `json:"seq"`
+	TS         int64  `json:"ts"`
+	Type       string `json:"type"`
+	Tool       string `json:"tool"`
+	Path       string `json:"path"`
+	DurationMS int64  `json:"duration_ms"`
+	Tokens     int    `json:"tokens"`
+}
+
+// ReviewMark 关键节点标注（M2 仅 first_error）。
+type ReviewMark struct {
+	Kind string `json:"kind"`
+	Seq  int    `json:"seq"`
+}
+
+// ReviewPair 一项对比指标的 A/B 值。
+type ReviewPair struct {
+	A float64 `json:"a"`
+	B float64 `json:"b"`
+}
+
+// ReviewCompare 双侧行为对比。
+type ReviewCompare struct {
+	PassRatio ReviewPair `json:"pass_ratio"`
+	ToolCalls ReviewPair `json:"tool_calls"`
+	Errors    ReviewPair `json:"errors"`
+	Edits     ReviewPair `json:"edits"`
+	Tokens    ReviewPair `json:"tokens"`
+	WallMS    ReviewPair `json:"wall_ms"`
+}
+
+// ReviewReport 对局复盘报告。
+type ReviewReport struct {
+	MatchID  int64                      `json:"match_id"`
+	TaskID   string                     `json:"task_id"`
+	TaskType string                     `json:"task_type"`
+	Status   string                     `json:"status"`
+	Winner   string                     `json:"winner"`
+	Sides    map[string]ReviewSideOut   `json:"sides"`
+	Timeline map[string][]ReviewTlEvent `json:"timeline"`
+	Marks    map[string][]ReviewMark    `json:"marks"`
+	Compare  ReviewCompare              `json:"compare"`
+}
+
+// Review 拉取指定对局的复盘报告（公开路由，无需 token）。
+func (c *Client) Review(matchID int64) (ReviewReport, error) {
+	var out ReviewReport
+	path := fmt.Sprintf("/api/matches/%d/review", matchID)
+	if err := c.do(http.MethodGet, path, "", nil, &out); err != nil {
+		return ReviewReport{}, err
+	}
+	return out, nil
+}
+
 // GzipEvents 把事件流序列化为 NDJSON 并 gzip 压缩（上报用；
 // 事件仅含路径/操作类型，无文件内容明文——隐私红线见项目 CLAUDE.md）。
 func GzipEvents(events []protocol.Event) ([]byte, error) {

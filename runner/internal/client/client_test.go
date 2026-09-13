@@ -499,3 +499,37 @@ func TestProfile(t *testing.T) {
 		t.Fatalf("profile_json 应原样透传: %q", profs[0].ProfileJSON)
 	}
 }
+
+// TestReview 复盘拉取：正常解码与 404 错误透传。
+func TestReview(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/matches/7/review" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"match_id":7,"task_id":"fix-add","task_type":"general",
+			"status":"done","winner":"a",
+			"sides":{"a":{"agent":"A","passed":2,"total":2,"wall_ms":100,"has_events":true},
+			         "b":{"agent":"B","passed":1,"total":2,"wall_ms":200,"has_events":false}},
+			"timeline":{"a":[{"seq":1,"ts":0,"type":"tool_call","tool":"bash","tokens":5}],"b":[]},
+			"marks":{"a":[{"kind":"first_error","seq":2}],"b":[]},
+			"compare":{"pass_ratio":{"a":1,"b":0.5},"tool_calls":{"a":1,"b":0},
+			           "errors":{"a":1,"b":0},"edits":{"a":0,"b":0},
+			           "tokens":{"a":5,"b":0},"wall_ms":{"a":100,"b":200}}}`)
+	}))
+	defer srv.Close()
+	rep, err := New(srv.URL).Review(7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.MatchID != 7 || rep.Winner != "a" || rep.Sides["a"].Agent != "A" ||
+		!rep.Sides["a"].HasEvents || rep.Timeline["a"][0].Tool != "bash" ||
+		rep.Marks["a"][0].Kind != "first_error" || rep.Compare.PassRatio.B != 0.5 {
+		t.Fatalf("复盘解码不符: %+v", rep)
+	}
+	// 404 透传为错误
+	if _, err := New(srv.URL).Review(99); err == nil || !strings.Contains(err.Error(), "404") {
+		t.Fatalf("404 应透传为错误: %v", err)
+	}
+}
