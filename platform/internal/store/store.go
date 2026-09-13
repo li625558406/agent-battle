@@ -57,8 +57,10 @@ CREATE TABLE IF NOT EXISTS results (
 // Open 打开（必要时创建）SQLite 库并建表。
 // foreign_keys 经 DSN _pragma 开启，对连接池内每条新建连接都生效。
 func Open(path string) (*Store, error) {
-	// file: URI 中路径统一用 / 分隔（Windows 兼容），并追加 _pragma。
-	dsn := "file:" + filepath.ToSlash(path) + "?_pragma=foreign_keys(1)"
+	// file: URI 中路径统一用 / 分隔（Windows 兼容）；foreign_keys 开启外键；
+	// busy_timeout(5000) 让并发写锁竞争退避等待最多 5s 而非立即 SQLITE_BUSY
+	//（M1 单进程，但 database/sql 连接池天然多连接，结算/上报并发路径可竞争）。
+	dsn := "file:" + filepath.ToSlash(path) + "?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err

@@ -3,6 +3,7 @@ package store
 import (
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func openTest(t *testing.T) *Store {
@@ -113,6 +114,43 @@ func TestAddResultRejectsBadSideAndDuplicate(t *testing.T) {
 	}
 	if _, err := s.AddResult(mid, "a", Result{Total: 1}); err == nil {
 		t.Fatal("duplicate side must fail")
+	}
+}
+
+// TestBusyTimeoutAllowsConcurrentWriters 验证 busy_timeout：一个连接持写锁
+// 期间，另一连接的写应退避等待锁释放后成功，而不是立即 SQLITE_BUSY 失败。
+func TestBusyTimeoutAllowsConcurrentWriters(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "busy.db")
+	s1, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s1.Close() })
+	s2, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s2.Close() })
+
+	// s1 开启写事务并持锁（INSERT 触发 RESERVED 锁）
+	tx, err := s1.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`INSERT INTO agents (name, token, created_at) VALUES ('lock', 'tok-lock', 0)`); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := s2.CreateAgent("waiter")
+		done <- err
+	}()
+	time.Sleep(200 * time.Millisecond)
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("并发写应在锁释放后成功（busy_timeout 生效）: %v", err)
 	}
 }
 
