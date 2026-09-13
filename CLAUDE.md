@@ -6,7 +6,7 @@ AgentBattle：本地优先的 AI agent 养成对战平台。用户的 coding age
 
 ## 关键文档
 
-- [CHANGE.md](./CHANGE.md) — 迭代记录。当前进度：2026-09-13 完成产品设计定稿（V0），待进入实现计划阶段。
+- [CHANGE.md](./CHANGE.md) — 迭代记录。当前进度：M1 runner-core 实现中（protocol/sandbox/adapter/collector/judge 已完成），judge 包审查问题已修复。
 - [设计文档](./docs/superpowers/specs/2026-09-13-agent-battle-platform-design.md) — 完整产品/技术设计：架构、Runner 设计、赛制、评分体系、防作弊、测试策略、里程碑。
 
 ## 核心设计红线（实现时不可违背）

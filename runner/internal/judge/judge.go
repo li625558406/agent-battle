@@ -7,6 +7,7 @@ package judge
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -16,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
 
 	"agentbattle/protocol"
 )
@@ -24,6 +26,8 @@ const (
 	manifestName = "manifest.json"
 	sigName      = "sig"
 	judgeDirName = ".judge"
+	// judgeIgnoreLine 是写入沙箱 .gitignore 的统一条目（带斜杠，仅匹配目录）。
+	judgeIgnoreLine = ".judge/"
 )
 
 // SignDir 对 taskDir/tests/manifest.json 做 HMAC-SHA256 签名，
@@ -31,6 +35,9 @@ const (
 //
 // 先 canonical 化（解析后重新序列化）再签名，消除空白/格式差异，
 // 保证跨机器（不同编辑器格式化习惯）可验证。
+// 注意：未知字段不在签名覆盖范围内——解析进 Go 结构体时即被丢弃，
+// 不会参与 canonical 序列化，因此追加未知字段的篡改不会被验签发现
+// （已知字段的任何改动仍会被拒绝）。
 func SignDir(taskDir string, key []byte) error {
 	manifestPath := filepath.Join(taskDir, "tests", manifestName)
 	raw, err := os.ReadFile(manifestPath)
@@ -56,6 +63,7 @@ func SignDir(taskDir string, key []byte) error {
 
 // verifyManifest 读取 manifest 与 sig，HMAC 恒时比较。
 // sig 缺失、hex 解码失败、内容或 key 不匹配一律拒绝。
+// 同 SignDir：canonical 化基于结构体序列化，未知字段不在签名覆盖范围内。
 func verifyManifest(testsDir string, key []byte) (protocol.JudgeManifest, error) {
 	var m protocol.JudgeManifest
 	raw, err := os.ReadFile(filepath.Join(testsDir, manifestName))
@@ -122,17 +130,35 @@ func Run(taskDir, sandbox string, key []byte) (protocol.JudgeReport, error) {
 	return rep, nil
 }
 
+// testTimeout 是单条判分命令的硬超时。
+// 包级 var（非 const）以便测试注入更短超时做对抗验证。
+var testTimeout = 2 * time.Minute
+
 // runOne 在沙箱 cwd 下执行单条测试命令。
+// 命令超时（testTimeout）被杀 → Passed=false、ExitCode=-1，
+// 错误不外抛：测试失败 ≠ 判分失败。
 func runOne(tc protocol.TestCommand, sandbox string) protocol.TestResult {
 	res := protocol.TestResult{Name: tc.Name}
-	cmd := exec.Command("bash", "-c", tc.Cmd)
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "bash", "-c", tc.Cmd)
 	cmd.Dir = sandbox
+	// 超时 kill 只杀 bash 自身；其孤儿子进程可能继承 stdout 管道导致
+	// Wait 永久阻塞（如 sleep infinity）。WaitDelay 保证 kill 后最迟
+	// 2s 强制关闭管道返回，超时是真正的硬上界。
+	cmd.WaitDelay = 2 * time.Second
 	out, err := cmd.CombinedOutput()
-	res.Passed = err == nil
-	if ee, ok := err.(*exec.ExitError); ok {
-		res.ExitCode = ee.ExitCode()
-	} else if err != nil {
-		res.ExitCode = -1 // 启动失败等非退出码错误
+	if ctx.Err() != nil {
+		// 超时被杀：标记该条失败，ExitCode=-1，但不让判分流程报错。
+		res.Passed = false
+		res.ExitCode = -1
+	} else {
+		res.Passed = err == nil
+		if ee, ok := err.(*exec.ExitError); ok {
+			res.ExitCode = ee.ExitCode()
+		} else if err != nil {
+			res.ExitCode = -1 // 启动失败等非退出码错误
+		}
 	}
 	sum := sha256.Sum256(out)
 	res.LogHash = hex.EncodeToString(sum[:])
@@ -140,8 +166,10 @@ func runOne(tc protocol.TestCommand, sandbox string) protocol.TestResult {
 }
 
 // hashGitDiff 计算沙箱内 git diff HEAD 输出的 sha256。
-// diff 输出走 stdout；ExitError（含有输出的 diff 失败）不视为致命，
-// 因为输出本身已可参与 hash。此处仅对命令启动失败返回 error。
+// diff 输出走 stdout。任何 ExitError 都视为致命错误（退出码 128 通常意味着
+// 沙箱不是 git 仓库或无基线 commit）——判分凭证宁可让判分失败，
+// 也绝不静默退化为 sha256("") 而与"无改动"的合法 hash 混淆。
+// 返回的 error 附带 stdout 摘要便于排查。
 func hashGitDiff(sandbox string) (string, error) {
 	cmd := exec.Command("git", "diff", "HEAD")
 	cmd.Dir = sandbox
@@ -149,9 +177,11 @@ func hashGitDiff(sandbox string) (string, error) {
 	cmd.Stdout = &stdout
 	cmd.Stderr = io.Discard
 	if err := cmd.Run(); err != nil {
-		if _, ok := err.(*exec.ExitError); !ok {
-			return "", fmt.Errorf("run git diff: %w", err)
+		if ee, ok := err.(*exec.ExitError); ok {
+			return "", fmt.Errorf("git diff HEAD 退出码 %d（沙箱可能不是 git 仓库或无基线 commit）: %.200s",
+				ee.ExitCode(), stdout.String())
 		}
+		return "", fmt.Errorf("run git diff: %w", err)
 	}
 	sum := sha256.Sum256(stdout.Bytes())
 	return hex.EncodeToString(sum[:]), nil
@@ -166,7 +196,7 @@ func ignoreJudgeDir(sandbox string) error {
 		return err
 	}
 	for _, line := range bytes.Split(data, []byte("\n")) {
-		if string(bytes.TrimSpace(line)) == judgeDirName {
+		if string(bytes.TrimSpace(line)) == judgeIgnoreLine {
 			return nil
 		}
 	}
@@ -180,12 +210,14 @@ func ignoreJudgeDir(sandbox string) error {
 			return err
 		}
 	}
-	_, err = f.WriteString(judgeDirName + "\n")
+	_, err = f.WriteString(judgeIgnoreLine + "\n")
 	return err
 }
 
-// copyTree 递归拷贝 src 目录到 dst（跳过 manifest.json 与 sig），
-// 文件权限 0o755 保证判分脚本可直接执行。
+// copyTree 递归拷贝 src 目录到 dst（跳过 manifest.json 与 sig）。
+// 覆盖语义：dst 中已存在的同名文件/目录会被直接覆盖；dst 中 src 没有的
+// 旧文件会残留（本函数不做清理）；所有文件统一按 0o755 写入，保证判分脚本
+// 可直接执行；符号链接会被解引用，拷贝的是链接指向的文件内容。
 func copyTree(src, dst string) error {
 	return filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
