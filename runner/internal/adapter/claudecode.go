@@ -6,16 +6,27 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"unicode/utf8"
 )
+
+// maxLineBytes 单行 stream-json 的容忍上限（16MB）。
+const maxLineBytes = 16 * 1024 * 1024
+
+// stderrTailMax 保留在错误信息里的 stderr 尾部长度（字节）。
+const stderrTailMax = 2000
 
 // ClaudeCode 接入 Claude Code headless（claude -p --output-format stream-json）。
 type ClaudeCode struct {
 	Bin  string // 为空则用 "claude"
 	YOLO bool   // true 时追加 --dangerously-skip-permissions
+
+	// testCmdHook 仅测试注入用：非 nil 时替代 exec.CommandContext 构建 cmd。
+	testCmdHook func(bin string, args []string) *exec.Cmd
 }
 
 func (c ClaudeCode) bin() string {
@@ -59,7 +70,12 @@ func (c ClaudeCode) Launch(ctx context.Context, cwd, taskDescription string, env
 	if c.YOLO {
 		args = append(args, "--dangerously-skip-permissions")
 	}
-	cmd := exec.CommandContext(ctx, c.bin(), args...)
+	var cmd *exec.Cmd
+	if c.testCmdHook != nil {
+		cmd = c.testCmdHook(c.bin(), args)
+	} else {
+		cmd = exec.CommandContext(ctx, c.bin(), args...)
+	}
 	cmd.Dir = cwd
 	cmd.Env = append(os.Environ(), env...)
 
@@ -67,37 +83,90 @@ func (c ClaudeCode) Launch(ctx context.Context, cwd, taskDescription string, env
 	if err != nil {
 		return fmt.Errorf("claude-code: stdout pipe: %w", err)
 	}
-	var stderrTail string // 尾部 2000 字符，供 cmd.Wait 出错时返回
+	var stderrTail string // 尾部 2000 字节（rune 边界安全），供 cmd.Wait 出错时返回
 	cmd.Stderr = io.MultiWriter(stderrWriter{func(p []byte) {
-		s := string(p)
-		stderrTail += s
-		if len(stderrTail) > 2000 {
-			stderrTail = stderrTail[len(stderrTail)-2000:]
-		}
+		stderrTail = truncateTail(stderrTail+string(p), stderrTailMax)
 	}})
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("claude-code: start: %w", err)
 	}
 
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024) // 容忍超长行
-	for scanner.Scan() {
-		evs, _ := parseLine(scanner.Bytes())
-		for _, ev := range evs {
-			select {
-			case out <- ev:
-			case <-ctx.Done():
-				_ = cmd.Wait() // ctx 取消已杀进程，仅回收
+	scanErr := c.pump(ctx, stdout, out)
+	// scanner 退出后（无论原因）先排空管道残余再 Wait：
+	// 否则子进程写满管道会阻塞到永远，Wait 随之挂死且掩盖真实错误。
+	_, _ = io.Copy(io.Discard, stdout)
+	waitErr := cmd.Wait()
+
+	switch {
+	case waitErr != nil && scanErr != nil:
+		return fmt.Errorf("claude-code: exited: %w; stdout scan: %v; stderr tail: %s", waitErr, scanErr, stderrTail)
+	case waitErr != nil:
+		return fmt.Errorf("claude-code: exited: %w; stderr tail: %s", waitErr, stderrTail)
+	case scanErr != nil:
+		return fmt.Errorf("claude-code: stdout scan: %w", scanErr)
+	}
+	return nil
+}
+
+// pump 逐行扫描 stdout 并把事件发到 out，返回 scanner 终止时的错误。
+// 遇到超过 maxLineBytes 的超长行：产出 error 事件、丢弃该行剩余部分后继续解析后续行。
+func (c ClaudeCode) pump(ctx context.Context, stdout io.Reader, out chan<- RawEvent) error {
+	rest := io.Reader(stdout)
+	for {
+		scanner := bufio.NewScanner(rest)
+		scanner.Buffer(make([]byte, 0, 64*1024), maxLineBytes) // 容忍超长行
+		for scanner.Scan() {
+			evs, _ := parseLine(scanner.Bytes())
+			if !sendAll(ctx, out, evs) {
 				return ctx.Err()
 			}
 		}
+		err := scanner.Err()
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, bufio.ErrTooLong) {
+			return err
+		}
+		// 超长行：报告后跳到行尾，继续解析后续行（result 行仍在后面）
+		if !sendAll(ctx, out, []RawEvent{{Type: "error", Note: "stdout 超长行（>16MB）被截断丢弃"}}) {
+			return ctx.Err()
+		}
+		rest = discardToNewline(rest)
 	}
+}
 
-	if err := cmd.Wait(); err != nil {
-		return fmt.Errorf("claude-code: exited: %w; stderr tail: %s", err, stderrTail)
+// sendAll 逐个发送事件；ctx 取消或超时时返回 false。
+func sendAll(ctx context.Context, out chan<- RawEvent, evs []RawEvent) bool {
+	for _, ev := range evs {
+		select {
+		case out <- ev:
+		case <-ctx.Done():
+			return false
+		}
 	}
-	return scanner.Err()
+	return true
+}
+
+// discardToNewline 读取并丢弃 r 中直到下一个 '\n'（含）的字节。
+// 返回的 reader 缓冲保留了换行之后的数据，可直接继续扫描后续行。
+func discardToNewline(r io.Reader) io.Reader {
+	br := bufio.NewReader(r)
+	_, _ = br.ReadBytes('\n') // EOF 时同样安全：缓冲为空，后续 scanner 直接结束
+	return br
+}
+
+// truncateTail 保留 s 尾部至多 max 字节，起点推进到 rune 边界，避免切断多字节 UTF-8 字符。
+func truncateTail(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	s = s[len(s)-max:]
+	for len(s) > 0 && !utf8.RuneStart(s[0]) {
+		s = s[1:]
+	}
+	return s
 }
 
 // stderrWriter 把回调适配成 io.Writer。
