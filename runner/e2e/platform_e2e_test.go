@@ -39,19 +39,11 @@ func TestPlatformLoopEcho(t *testing.T) {
 
 	// 构建 CLI 二进制：避免 go run 的编译输出混入 stdout 解析
 	bin := filepath.Join(t.TempDir(), "agentbattle.exe")
-	build := func(target, pkg string) {
-		t.Helper()
-		c := exec.Command("go", "build", "-o", target, pkg)
-		c.Dir = root // 包相对路径以仓库根为基准
-		if out, err := c.CombinedOutput(); err != nil {
-			t.Fatalf("构建 %s 失败: %v\n%s", pkg, err, out)
-		}
-	}
-	build(bin, "./runner/cmd/agentbattle")
+	buildBin(t, root, bin, "./runner/cmd/agentbattle")
 
 	// server 二进制（不用 go run：Windows 下 go run 的子进程 kill 不干净）
 	serverBin := filepath.Join(t.TempDir(), "agentbattle-server.exe")
-	build(serverBin, "./platform/cmd/agentbattle-server")
+	buildBin(t, root, serverBin, "./platform/cmd/agentbattle-server")
 
 	// server：独立任务目录（从 examples/fix-add 纯 Go 递归拷贝，不依赖外部 cp）
 	tasksDir := t.TempDir()
@@ -213,6 +205,16 @@ func parseLadder(t *testing.T, out string) map[string]ladderRow {
 	return rows
 }
 
+// buildBin 构建 go 包为二进制（包相对路径以仓库根为基准）。
+func buildBin(t *testing.T, root, target, pkg string) {
+	t.Helper()
+	c := exec.Command("go", "build", "-o", target, pkg)
+	c.Dir = root
+	if out, err := c.CombinedOutput(); err != nil {
+		t.Fatalf("构建 %s 失败: %v\n%s", pkg, err, out)
+	}
+}
+
 // extractToken 从 register 输出解析 "token: <tok>" 行。
 func extractToken(t *testing.T, out string) string {
 	t.Helper()
@@ -286,4 +288,96 @@ func copyDir(src, dst string) error {
 		}
 		return outF.Close()
 	})
+}
+
+// TestProfileKnownDifference M2 验收：--fix-a 的 A（全通过）与空配置 B
+//（半通过）镜像 2 局后，profile 子命令查得 A 的 correctness 分严格高于 B。
+// 独立起服（与 TestPlatformLoopEcho 隔离，避免共享天梯/画像状态）。
+func TestProfileKnownDifference(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short 模式跳过黑盒 E2E")
+	}
+	root := findRepoRoot(t)
+	bin := filepath.Join(t.TempDir(), "agentbattle.exe")
+	buildBin(t, root, bin, "./runner/cmd/agentbattle")
+	serverBin := filepath.Join(t.TempDir(), "agentbattle-server.exe")
+	buildBin(t, root, serverBin, "./platform/cmd/agentbattle-server")
+
+	tasksDir := t.TempDir()
+	if err := copyDir(filepath.Join(root, "examples", "fix-add"), filepath.Join(tasksDir, "fix-add")); err != nil {
+		t.Fatalf("拷贝示例任务失败: %v", err)
+	}
+	dbPath := filepath.Join(t.TempDir(), "profile-e2e.db")
+	addr := fmt.Sprintf("127.0.0.1:%d", freePort(t))
+	srvCmd := exec.Command(serverBin, "--addr", addr, "--tasks", tasksDir, "--store", dbPath)
+	srvCmd.Dir = root
+	var srvOut bytes.Buffer
+	srvCmd.Stdout = &srvOut
+	srvCmd.Stderr = &srvOut
+	if err := srvCmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		srvCmd.Process.Kill()
+		srvCmd.Wait()
+		if t.Failed() {
+			t.Logf("server 输出:\n%s", srvOut.String())
+		}
+	})
+	waitHTTP(t, "http://"+addr+"/api/ladder")
+
+	run := func(args ...string) string {
+		t.Helper()
+		c := exec.Command(bin, args...)
+		b, err := c.CombinedOutput()
+		if err != nil {
+			t.Fatalf("cli %v: %v\n%s", args, err, b)
+		}
+		return string(b)
+	}
+	tokA := extractToken(t, run("register", "--server", "http://"+addr, "--name", "profA"))
+	tokB := extractToken(t, run("register", "--server", "http://"+addr, "--name", "profB"))
+
+	taskOut := filepath.Join(t.TempDir(), "task")
+	run("fetch", "--server", "http://"+addr, "--task", "fix-add", "--out", taskOut)
+
+	rep := run("mirror",
+		"--server", "http://"+addr,
+		"--task", taskOut,
+		"--task-id", "fix-add",
+		"--agent", "echo",
+		"--fix-a", "add() { echo $(( $1 + $2 )); }",
+		"--rounds", "2",
+		"--name-a", "profA", "--token-a", tokA,
+		"--name-b", "profB", "--token-b", tokB,
+		"--out", filepath.Join(t.TempDir(), "reports"))
+	if !strings.Contains(rep, "A崩 0 | B崩 0") {
+		t.Fatalf("mirror 存在崩溃侧:\n%s", rep)
+	}
+
+	// profile 子命令：A correctness 75（2/2 在 [1,1,.5,.5] 基线中 pct=75、
+	// AllPass 同为 75 → 均值 75）；B 25。断言严格高于即可（对公式细节鲁棒）。
+	getScore := func(name string) float64 {
+		t.Helper()
+		out := run("profile", "--server", "http://"+addr, "--name", name)
+		// tabwriter 输出以空格填充对齐（非 tab 分隔），故用 \s+ 匹配列间空白
+		re := regexp.MustCompile(`(?m)^\s*correctness\s+([\d.]+)\s`)
+		m := re.FindStringSubmatch(out)
+		if m == nil {
+			t.Fatalf("%s 输出缺 correctness 行:\n%s", name, out)
+		}
+		s, err := strconv.ParseFloat(m[1], 64)
+		if err != nil {
+			t.Fatalf("correctness 分数解析失败: %v\n%s", err, out)
+		}
+		return s
+	}
+	sa, sb := getScore("profA"), getScore("profB")
+	t.Logf("correctness: A=%v B=%v", sa, sb)
+	if sa <= sb {
+		t.Fatalf("画像未复现已知差异: A=%v B=%v\n", sa, sb)
+	}
+	if sa < 70 || sb > 30 {
+		t.Fatalf("分数偏离百分位公式预期（A≈75 B≈25）: A=%v B=%v", sa, sb)
+	}
 }
