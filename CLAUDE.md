@@ -6,7 +6,7 @@ AgentBattle：本地优先的 AI agent 养成对战平台。用户的 coding age
 
 ## 关键文档
 
-- [CHANGE.md](./CHANGE.md) — 迭代记录。当前进度：**M1 计划 1（Runner 核心闭环）已完成并通过最终收官审查**；**计划 2（平台侧：注册/下发/上传/Elo/天梯）进行中**——已完成 judge GIT_DIR 过滤 + mirror 验签预检、mirror ctx 取消路径修复。
+- [CHANGE.md](./CHANGE.md) — 迭代记录。当前进度：**M1 计划 1（Runner 核心闭环）与计划 2（平台最小功能 + Runner 联网对接）均已完成**——平台注册/任务下发/结果上报/Elo 结算/基础天梯全链路联通，真实 claude 联网 2 局验证通过（Elo 结算与天梯可见）。平台/Runner 代码分别在 `platform/`、`runner/` 子树。
 - [设计文档](./docs/superpowers/specs/2026-09-13-agent-battle-platform-design.md) — 完整产品/技术设计：架构、Runner 设计、赛制、评分体系、防作弊、测试策略、里程碑。
 
 ## 核心设计红线（实现时不可违背）

@@ -1,5 +1,29 @@
 # CHANGE.md — 项目迭代记录
 
+## 2026-09-13 · M1 计划 2 完成：平台最小功能 + Runner 联网对接，真实 claude 联网对战验证通过
+
+**主题**：平台侧（注册/任务下发/结果上报/Elo 结算/基础天梯）+ Runner 联网对接全链路联通，M1 计划 2（9 任务）完成
+
+**核心变更**：
+- 前置修复（收官审查遗留 3 项）：① judge 包 git 调用统一走 `gitEnv()`（过滤宿主 `GIT_DIR`/`GIT_WORK_TREE`，hashGitDiff 与判分命令两条路径均覆盖），导出 `judge.VerifyDir`（复用 verifyManifest），mirror 预检升级为验签（坏判分包不再污染 N 局统计）；② mirror ctx 取消/超时局中不计 agent 崩溃、两处取消路径均落盘部分汇总（abort helper，`errors.Is(Canceled/DeadlineExceeded)` 可识别）
+- 新增 `platform/` 子树：`elo`（纯函数评级：1200 起、前 10 局 K=40、之后 K=20）→ `store`（SQLite/modernc.org/sqlite 纯 Go，唯一第三方依赖；agents/matches/results 三表、DSN 级 `PRAGMA foreign_keys=ON`、双侧到齐事务结算、winnerOf 与 runner 侧注释互指）→ `api`（REST 5 路由 + X-Token auth：注册/对局创建/结果上报/Elo 结算回传/天梯/任务包 zip 分发；taskID 防目录穿越、body 1MB 上限、错误不泄漏内部信息、禁止自我对局）→ `cmd/agentbattle-server`（--addr/--tasks/--store/--judge-key）
+- Runner 侧：`runner/internal/client`（Register/CreateMatch/UploadResult/Ladder/FetchBundle 256MB 上限/ExtractBundle 三重 zip slip 防护+单文件 64MB 上限/GzipEvents 事件流上报）+ CLI register/fetch/ladder 子命令 + mirror `--server` 上报模式（`MirrorConfig.Report` 每轮回调，每轮 = 平台一场 match，崩溃侧按 0/0 上报，结束后展示天梯前 5；天梯拉取失败降级警告不改退出码）
+- 黑盒 E2E（`runner/e2e/platform_e2e_test.go`，约 4s）：build CLI+server 二进制 → 随机端口起服 → 注册→fetch→mirror --server→结算→天梯 全链路；echo 双侧无差异化、胜负由 WallMS 决定，断言采用胜方无关三分支（1220/1180/双 1200）+ 天梯统计交叉校验（防 runner/platform 两套 winner 规则漂移）
+- 审查驱动修复：id/match_id 按契约输出 JSON 数字（原字符串会导致联调 unmarshal 必挂）、UNIQUE 冲突与写库故障分流 409/500、bundle 错误路径 `http.ErrAbortHandler` 断连、agent_a==agent_b 400、FetchBundle 256MB 显式报错、client 协议断言/事件流 roundtrip/大条目拒绝等 6 个测试补强
+
+**真实验证（本机 claude-code 联网镜像 2 局，CLAUDE_CODE_GIT_BASH_PATH 经 --env-a/b 注入）**：
+- 2 局全部成功、零崩溃：第 1 局 winner=a（1200→1220/1180），第 2 局 winner=a（→1237.7/1162.3，定级赛 K=40 数学正确）
+- 天梯 API/CLI 双端可见：claude-real-A 1238 分 2 胜、claude-real-B 1162 分 2 负
+- DB 核验：results=4（2 局×双侧）、events_gz 全非空、matches done=2、winner 记录正确；本地 4 份 events.ndjson 事件链完整
+
+**遗留事项**：
+- 平台 judge_key 为固定开发密钥（dev-secret），按局随机下发划入后续里程碑
+- mirror 中止语义在平台侧遗留永远 waiting 的半场 match（孤儿对局），需平台超时判负/清理机制兜底
+- CLI echo 无 A/B 差异化（mirror --agent echo 时两侧同配置），单局结局由 WallMS 抖动决定——E2E 已按三分支防御；确定性 A 胜链路验证需 CLI 支持分侧配置（如 --fix-a）
+- winner 规则 runner/store 双份实现的漂移风险由注释互指 + E2E 天梯交叉校验兜住；settle 幂等检查非原子（M1 单进程串行可接受）
+- sentinel 匹配（errors.Is Canceled/DeadlineExceeded）理论上可被开放 adapter 接口的自含 ctx 错误误触发，当前内置 adapter 不可达，扩展 adapter 前应改类型化判别
+- judge `TestRunCommandTimeout` 全量并发下偶发计时抖动（存量，独立复跑稳定）
+
 ## 2026-09-13 · mirror ctx 取消路径修复：不计 agent 崩溃 + 落盘部分汇总（M1 计划 2 · Task 2）
 
 **主题**：修复 `Mirror` 在 ctx 取消/超时打断局中时的两处统计与数据丢失缺陷
