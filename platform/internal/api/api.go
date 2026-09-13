@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -95,8 +96,13 @@ func (s *Server) handleRegisterAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	ag, err := s.St.CreateAgent(body.Name)
 	if err != nil {
-		// 唯一索引冲突（重名）→ 409；其余写库失败 → 500
-		writeErr(w, http.StatusConflict, "agent 名已存在")
+		// 唯一索引冲突（重名）→ 409；其余写库失败 → 500，不回显内部错误
+		if strings.Contains(err.Error(), "UNIQUE") {
+			writeErr(w, http.StatusConflict, "agent 名已存在")
+		} else {
+			log.Printf("注册 agent %q 写库失败: %v", body.Name, err)
+			writeErr(w, http.StatusInternalServerError, "注册写入失败")
+		}
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
@@ -115,6 +121,11 @@ func (s *Server) handleCreateMatch(w http.ResponseWriter, r *http.Request, ag st
 	}
 	if body.TaskID == "" || body.AgentA == "" || body.AgentB == "" {
 		writeErr(w, http.StatusBadRequest, "task_id/agent_a/agent_b 均不能为空")
+		return
+	}
+	// 禁止自我对局：同一 agent 不能同时作为双方
+	if body.AgentA == body.AgentB {
+		writeErr(w, http.StatusBadRequest, "agent_a 与 agent_b 不能相同")
 		return
 	}
 	// 对抗性：task_id 用于路径拼接，必须防目录穿越
@@ -188,8 +199,13 @@ func (s *Server) handleResult(w http.ResponseWriter, r *http.Request, ag store.A
 		DiffHash: body.DiffHash, EventsGZ: eventsGZ,
 	})
 	if err != nil {
-		// 同侧重复提交被 results 主键拒绝 → 409；其余 → 500
-		writeErr(w, http.StatusConflict, "结果写入失败（同侧可能已提交过）: "+err.Error())
+		// 同侧重复提交被 results 主键拒绝 → 409；其余写库失败 → 500，不回显内部错误
+		if strings.Contains(err.Error(), "UNIQUE") {
+			writeErr(w, http.StatusConflict, "该侧结果已上报过")
+		} else {
+			log.Printf("对局 %d 结果写入失败: %v", matchID, err)
+			writeErr(w, http.StatusInternalServerError, "结果写入失败")
+		}
 		return
 	}
 	if !done {
@@ -281,9 +297,10 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 		return err
 	})
 	if err != nil {
-		// 头已发出，无法改状态码；只能中断连接侧的响应
-		http.Error(w, "打包失败: "+err.Error(), http.StatusInternalServerError)
-		return
+		// 响应头已发出、zip 已部分写出，无法再改状态码；
+		// 中断连接避免客户端把截断的 zip 当有效数据，且不回显内部错误
+		log.Printf("任务 %q 打包失败: %v", taskID, err)
+		panic(http.ErrAbortHandler)
 	}
 	zw.Close()
 }

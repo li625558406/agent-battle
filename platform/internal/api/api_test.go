@@ -186,6 +186,13 @@ func TestMatchFlow(t *testing.T) {
 		t.Fatalf("agent 不存在状态码 = %d, 期望 400", resp.StatusCode)
 	}
 
+	// 自我对局（agent_a == agent_b）：400（对抗性：污染战绩归属）
+	resp, _ = do(t, "POST", srv.URL+"/api/matches", tokA,
+		map[string]any{"task_id": "demo", "agent_a": "A", "agent_b": "A"})
+	if resp.StatusCode != 400 {
+		t.Fatalf("自我对局状态码 = %d, 期望 400", resp.StatusCode)
+	}
+
 	// task_id 路径穿越：400（对抗性）
 	resp, _ = do(t, "POST", srv.URL+"/api/matches", tokA,
 		map[string]any{"task_id": "../etc", "agent_a": "A", "agent_b": "B"})
@@ -251,10 +258,14 @@ func TestMatchFlow(t *testing.T) {
 		t.Fatalf("A 上报: %d %v, 期望 200 waiting", resp.StatusCode, m)
 	}
 
-	// A 同侧重复上报：被主键拒绝，应报错（4xx），不能改写结果
-	resp, _ = do(t, "POST", srv.URL+"/api/matches/"+matchID+"/results", tokA, resBody(9))
-	if resp.StatusCode < 400 || resp.StatusCode >= 500 {
-		t.Fatalf("同侧重复上报状态码 = %d, 期望 4xx", resp.StatusCode)
+	// A 同侧重复上报：被主键拒绝，应 409，不能改写结果
+	resp, m = do(t, "POST", srv.URL+"/api/matches/"+matchID+"/results", tokA, resBody(9))
+	if resp.StatusCode != 409 {
+		t.Fatalf("同侧重复上报状态码 = %d, 期望 409", resp.StatusCode)
+	}
+	// 错误文案必须是固定提示，不得回显 SQLite 内部错误（约束名/路径泄漏）
+	if s, _ := m["error"].(string); s != "该侧结果已上报过" {
+		t.Fatalf("同侧重复上报错误文案 = %q, 期望固定文案", s)
 	}
 
 	// B 上报：done，winner=a，Elo 1220/1180（双方 1200 起、首局 K=40）
