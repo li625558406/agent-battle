@@ -1,5 +1,18 @@
 # CHANGE.md — 项目迭代记录
 
+## 2026-09-13 · mirror ctx 取消路径修复：不计 agent 崩溃 + 落盘部分汇总（M1 计划 2 · Task 2）
+
+**主题**：修复 `Mirror` 在 ctx 取消/超时打断局中时的两处统计与数据丢失缺陷
+
+**核心变更**：
+- 缺陷 1：ctx 取消发生在局中时，双侧 `session.Run` 返回的 ctx 包装错误被错误归类 switch 计为 agent 崩溃（AErrors/BErrors++），污染天梯数据
+- 缺陷 2：取消后循环顶提前 return 跳过 persistSummary，已完成局的数据全部丢失
+- 修复：双 Run 完成后、错误归类 switch 之前新增中止检查（`ctx.Err() != nil` 或 errA/errB `errors.Is` Canceled/DeadlineExceeded），命中则不计崩溃、落盘部分汇总后原样返回 ctx 错误；循环顶的取消 return 同样改为先落盘；新增 `abort` helper（落盘失败用 `errors.Join` 与中止原因一并上报，不掩盖）
+- 精确性依据：`session.Run` 仅在父 ctx 已取消时返回包装 `context.Canceled/DeadlineExceeded` 的错误，单局自身超时返回的 "agent 执行超时(%s)" 不包装 sentinel——`errors.Is` 判定不会误吞真实超时崩溃
+- 测试（TDD 先红后绿）：`TestMirrorCancelMidRound`（slowCancelAdapter 局中取消：断言返回 Canceled、AErrors/BErrors=0、mirror-*.json 已落盘）、`TestMirrorDeadlineMidRound`（父 ctx 超时路径）；既有测试含 `TestSessionRunTimeout` 全量回归通过（`-race`）
+
+**遗留事项**：无
+
 ## 2026-09-13 · M1 计划 1 完成：真实 Claude Code 冒烟 + 20 局镜像对战验证（M1 runner-core）
 
 **主题**：Runner 核心闭环真实环境验证通过，M1 计划 1（runner-core）完成
