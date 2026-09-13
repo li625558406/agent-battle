@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -102,8 +103,12 @@ func TestRegisterAgent(t *testing.T) {
 	if resp.StatusCode != 201 {
 		t.Fatalf("状态码 = %d, 期望 201", resp.StatusCode)
 	}
-	if m["name"] != "alpha" || m["token"] == "" || m["id"] == "" {
+	if m["name"] != "alpha" || m["token"] == "" {
 		t.Fatalf("响应字段缺失: %v", m)
+	}
+	// 契约：id 必须是 JSON 数字（客户端按 int64 解析）
+	if id, ok := m["id"].(float64); !ok || id < 1 {
+		t.Fatalf("注册响应 id = %v, 期望正数数字", m["id"])
 	}
 
 	// 重名：409
@@ -213,10 +218,12 @@ func TestMatchFlow(t *testing.T) {
 	if resp.StatusCode != 201 {
 		t.Fatalf("创建对局状态码 = %d, 期望 201", resp.StatusCode)
 	}
-	matchID, _ := m["match_id"].(string)
-	if matchID == "" || m["judge_key"] == "" {
+	// 契约：match_id 必须是 JSON 数字（客户端按 int64 解析）
+	matchIDf, ok := m["match_id"].(float64)
+	if !ok || m["judge_key"] == "" {
 		t.Fatalf("创建对局响应缺少 match_id/judge_key: %v", m)
 	}
+	matchID := strconv.FormatInt(int64(matchIDf), 10)
 
 	// 同侧重复上报应被拒绝（对抗性：幂等/重复触发）
 	resBody := func(passed int) map[string]any {

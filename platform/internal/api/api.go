@@ -106,7 +106,7 @@ func (s *Server) handleRegisterAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"id": strconv.FormatInt(ag.ID, 10), "name": ag.Name, "token": ag.Token,
+		"id": ag.ID, "name": ag.Name, "token": ag.Token,
 	})
 }
 
@@ -153,7 +153,7 @@ func (s *Server) handleCreateMatch(w http.ResponseWriter, r *http.Request, ag st
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"match_id":  strconv.FormatInt(id, 10),
+		"match_id":  id,
 		"judge_key": string(s.JudgeKey),
 	})
 }

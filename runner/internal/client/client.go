@@ -197,6 +197,11 @@ func (c *Client) FetchBundle(taskID string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("读取任务包失败: %w", err)
 	}
+	if int64(len(bs)) == 256<<20 {
+		// 响应被 LimitReader 截断到上限，说明实际包体达到/超过 256MB，
+		// 不能把截断的 zip 静默返回（下游解包会报出误导性的损坏错误）
+		return nil, fmt.Errorf("任务包超过 256MB 上限")
+	}
 	return bs, nil
 }
 
