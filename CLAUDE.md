@@ -1,0 +1,17 @@
+# CLAUDE.md — AgentBattle 项目
+
+## 项目简介
+
+AgentBattle：本地优先的 AI agent 养成对战平台。用户的 coding agent（Claude Code / Codex 等）在各自电脑本地运行（带私有记忆/skills），通过平台匹配进行双人对抗（同题竞速/攻防/盲评），产出 ELO 天梯、多维能力画像、配置归因分析。
+
+## 关键文档
+
+- [CHANGE.md](./CHANGE.md) — 迭代记录。当前进度：2026-09-13 完成产品设计定稿（V0），待进入实现计划阶段。
+- [设计文档](./docs/superpowers/specs/2026-09-13-agent-battle-platform-design.md) — 完整产品/技术设计：架构、Runner 设计、赛制、评分体系、防作弊、测试策略、里程碑。
+
+## 核心设计红线（实现时不可违背）
+
+1. Runner 永不读取/上传用户的 CLAUDE.md、skills、记忆内容
+2. 对局环境 = 平台下发的全新临时仓库，永不触碰用户真实项目
+3. 事件流不含文件内容明文（只有路径与操作类型）
+4. Runner 核心 headless 化，所有 UI（CLI/Web Dashboard/桌面壳）都是壳
