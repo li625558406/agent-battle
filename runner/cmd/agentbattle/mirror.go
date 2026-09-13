@@ -20,7 +20,7 @@ func cmdMirror(args []string) error {
 	var envA, envB envFlag
 	fs.Var(&envA, "env-a", "A 侧环境变量 K=V，可多次")
 	fs.Var(&envB, "env-b", "B 侧环境变量 K=V，可多次")
-	if err := fs.Parse(args); err != nil {
+	if helped, err := parseFlags(fs, args); err != nil || helped {
 		return err
 	}
 	if *task == "" {

@@ -20,7 +20,7 @@ func cmdRun(args []string) error {
 	yolo := fs.Bool("yolo", false, "claude-code 追加 --dangerously-skip-permissions")
 	var envs envFlag
 	fs.Var(&envs, "env", "追加给 agent 的环境变量 K=V，可多次")
-	if err := fs.Parse(args); err != nil {
+	if helped, err := parseFlags(fs, args); err != nil || helped {
 		return err
 	}
 	if *task == "" {

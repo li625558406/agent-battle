@@ -2,6 +2,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -18,6 +19,19 @@ func newFlagSet(name string) *flag.FlagSet {
 	return fs
 }
 
+// parseFlags 解析子命令参数，返回 (是否为帮助请求, 错误)。
+// 用户主动 -h/--help 时 flag 包打印 usage 并返回 flag.ErrHelp，此时
+// helped=true，调用方应立即返回 nil（上层 exit 0），不得继续校验必填参数。
+func parseFlags(fs *flag.FlagSet, args []string) (bool, error) {
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return true, nil
+		}
+		return false, err
+	}
+	return false, nil
+}
+
 // sessionDevKey 返回本地开发默认判分 key（与 session.DevJudgeKey 一致）。
 func sessionDevKey() []byte { return []byte(session.DevJudgeKey) }
 
@@ -32,9 +46,18 @@ type envFlag []string
 func (e *envFlag) String() string { return strings.Join(*e, ",") }
 
 // Set 校验必须含 "=" 且不以 "=" 开头（即 K 非空），否则拒绝。
+// 重复 K 覆盖旧值（保留最后出现的值），与 Go 子进程环境的去重语义
+// （同名保最后）一致，且调用方传入的切片所见即所得。
 func (e *envFlag) Set(v string) error {
 	if !strings.Contains(v, "=") || strings.HasPrefix(v, "=") {
 		return fmt.Errorf("--env 必须为 K=V 形式: %q", v)
+	}
+	k, _, _ := strings.Cut(v, "=")
+	for i, old := range *e {
+		if ok, _, _ := strings.Cut(old, "="); strings.EqualFold(ok, k) {
+			(*e)[i] = v
+			return nil
+		}
 	}
 	*e = append(*e, v)
 	return nil

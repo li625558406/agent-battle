@@ -3,7 +3,6 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 
 	"agentbattle/runner/internal/judge"
@@ -14,7 +13,7 @@ func cmdSign(args []string) error {
 	fs := newFlagSet("sign")
 	task := fs.String("task", "", "任务目录（必填）")
 	key := fs.String("key", string(sessionDevKey()), "HMAC key（默认本地开发 key）")
-	if err := fs.Parse(args); err != nil {
+	if helped, err := parseFlags(fs, args); err != nil || helped {
 		return err
 	}
 	if *task == "" {
@@ -23,6 +22,7 @@ func cmdSign(args []string) error {
 	if err := judge.SignDir(*task, []byte(*key)); err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "已签名: %s\n", filepath.Join(*task, "tests", "sig"))
+	// 成功信息与 run/mirror 一致走 stdout，stderr 只留错误
+	fmt.Printf("已签名: %s\n", filepath.Join(*task, "tests", "sig"))
 	return nil
 }
