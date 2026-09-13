@@ -27,6 +27,8 @@ func main() {
 	switch os.Args[1] {
 	case "run":
 		err = cmdRun(os.Args[2:])
+	case "mirror":
+		err = cmdMirror(os.Args[2:])
 	case "sign":
 		err = cmdSign(os.Args[2:])
 	case "-h", "--help", "help":

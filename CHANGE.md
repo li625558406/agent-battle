@@ -1,5 +1,19 @@
 # CHANGE.md — 项目迭代记录
 
+## 2026-09-13 · 示例任务 + CLI + 镜像对战（M1 runner-core, Task 10-12）
+
+**主题**：`examples/fix-add` 示例任务、`agentbattle` CLI（run/mirror/sign）、session 镜像对战
+
+**核心变更**：
+- Task 10：新增 `examples/fix-add`（task.json + 带 bug 的 seed/calc.sh + tests 判分包 + HMAC sig）。判分两用例：add-basic（bash 脚本验 add 2/3、10/-4）与 file-only-change（git diff 只许动 calc.sh）；seed 刻意用位置参数 `$1 $2`（未定义变量在 bash 算术中恒 0，`$a $b` 写法会使判分失真）
+- Task 11：新增 `runner/cmd/agentbattle`：run（单局，--agent echo|claude-code、--env K=V 可多次带校验）、sign（judge.SignDir）、统一 usage/输出目录（mustOutDir → TempDir/agentbattle-reports）
+- Task 12：`session.Mirror` A/B 镜像对战 N 局：Summary/RoundDetail（全 snake_case json tag）+ persistSummary 落盘 `mirror-<taskid>-<ts>.json`；胜负规则：双方 0 通过直接平局 → 通过比例高者胜 → 同分比 WallMS 短者胜 → 再平局；单侧崩溃判给对方并计错误数
+- CLI mirror 子命令：--env-a/--env-b 配置分化、--rounds 默认 20、pickAdapter 预检
+
+**遗留事项**：
+- winner 规则与原计划有一处偏差：双方均 0 通过时直接判平（原计划字面规则"同分比耗时"会使规格自带的 TestMirrorTieOnBothFail 永远无法确定性地得到 Ties==2）；有产出的对局仍按"通过数→耗时→平局"决胜
+- CLI mirror 对 echo 两侧注入相同配置（无 FixContent），同分时结果由 wall 毫秒噪声决定，属预期行为（真实 agent 场景由 env 配置分化产生差异）
+
 ## 2026-09-13 · judge 包审查问题修复（M1 runner-core）
 
 **主题**：`runner/internal/judge` 代码审查 Important-1/2 与 Minor 修复
