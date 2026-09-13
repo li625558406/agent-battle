@@ -1,0 +1,125 @@
+// recompute_test.go —— 与 store 的集成测试。
+package profile
+
+import (
+	"bytes"
+	"compress/gzip"
+	"encoding/json"
+	"path/filepath"
+	"testing"
+
+	"agentbattle/protocol"
+	"agentbattle/platform/internal/store"
+)
+
+func newStore(t *testing.T) *store.Store {
+	t.Helper()
+	s, err := store.Open(filepath.Join(t.TempDir(), "p.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	return s
+}
+
+// gzEvents 把事件流压成 events_gz 形态（与 runner 侧 GzipEvents 同构）。
+func gzEvents(t *testing.T, events []protocol.Event) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	enc := json.NewEncoder(gw)
+	for _, e := range events {
+		if err := enc.Encode(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// TestRecomputeIdempotentAndIsolated 跑通"读窗口 → 聚合 → 落库"，两次重算
+// 的维度分完全一致（幂等），且 task_type 互不污染。
+func TestRecomputeIdempotentAndIsolated(t *testing.T) {
+	s := newStore(t)
+	a, _ := s.CreateAgent("ra")
+	b, _ := s.CreateAgent("rb")
+	events := []protocol.Event{{Type: protocol.EventToolCall, Tokens: 10}, {Type: protocol.EventFileEdit}}
+
+	mk := func(taskType string, passed int) int64 {
+		t.Helper()
+		mid, err := s.CreateMatch("tk", taskType, a.ID, b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for side, p := range map[string]int{"a": passed, "b": 0} {
+			gz := gzEvents(t, events)
+			if p == 0 && side == "b" {
+				gz = nil // B 侧事件流缺失：降级路径
+			}
+			if _, err := s.AddResult(mid, side, store.Result{Passed: p, Total: 2, EventsGZ: gz}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return mid
+	}
+	mk("debug", 2)
+	mk("debug", 2)
+	mk("general", 2)
+	mk("general", 2)
+
+	if err := Recompute(s, a.ID, "debug"); err != nil {
+		t.Fatal(err)
+	}
+	ps1, err := s.ProfilesByAgent("ra")
+	if err != nil || len(ps1) != 1 {
+		t.Fatalf("debug 池重算后应 1 条画像: %v %v", ps1, err)
+	}
+	first := ps1[0].ProfileJSON
+
+	if err := Recompute(s, a.ID, "debug"); err != nil {
+		t.Fatal(err)
+	}
+	ps2, _ := s.ProfilesByAgent("ra")
+	if ps2[0].ProfileJSON != first {
+		t.Fatalf("同数据两次重算应幂等（维度分一致）:\n%s\n%s", first, ps2[0].ProfileJSON)
+	}
+
+	// general 是独立池：重算后 debug 画像不受影响
+	if err := Recompute(s, a.ID, "general"); err != nil {
+		t.Fatal(err)
+	}
+	ps3, _ := s.ProfilesByAgent("ra")
+	if len(ps3) != 2 {
+		t.Fatalf("task_type 间应互相隔离: %d", len(ps3))
+	}
+	for _, p := range ps3 {
+		if p.TaskType == "debug" && p.ProfileJSON != first {
+			t.Fatal("debug 画像不应被 general 重算波及")
+		}
+	}
+	// 画像可反序列化回 Profile 且样本量正确
+	for _, p := range ps3 {
+		var doc Profile
+		if err := json.Unmarshal([]byte(p.ProfileJSON), &doc); err != nil {
+			t.Fatalf("profile_json 应为合法 Profile JSON: %v", err)
+		}
+		if doc.SampleSize != 2 || len(doc.Dims) != 6 {
+			t.Fatalf("样本与维度数错误: %+v", doc)
+		}
+	}
+}
+
+// TestRecomputeNoMatches 无任何对局时不落画像（空窗口不产生垃圾行）。
+func TestRecomputeNoMatches(t *testing.T) {
+	s := newStore(t)
+	a, _ := s.CreateAgent("empty")
+	if err := Recompute(s, a.ID, "general"); err != nil {
+		t.Fatalf("空窗口重算不应报错: %v", err)
+	}
+	ps, _ := s.ProfilesByAgent("empty")
+	if len(ps) != 0 {
+		t.Fatalf("空窗口不应落库: %d", len(ps))
+	}
+}
