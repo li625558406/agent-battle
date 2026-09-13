@@ -22,5 +22,7 @@ type Adapter interface {
 	// Launch 在 cwd 中以 taskDescription 运行 agent，事件流入 out。
 	// env 为追加给 agent 进程的环境变量（配置分化的载体）。
 	// ctx 取消/超时必须杀死 agent 进程。out 由调用方 close。
+	// 调用方须在 Launch 执行期间持续接收 out（建议缓冲 ≥256 并并发排空），
+	// 否则真实 agent 流式产出会阻塞。
 	Launch(ctx context.Context, cwd, taskDescription string, env []string, out chan<- RawEvent) error
 }

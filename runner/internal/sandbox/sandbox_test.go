@@ -3,6 +3,7 @@ package sandbox
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -53,5 +54,50 @@ func TestCleanupRemovesSandbox(t *testing.T) {
 	cleanup()
 	if _, err := os.Stat(sb); !os.IsNotExist(err) {
 		t.Fatal("sandbox not removed after cleanup")
+	}
+}
+
+// C1：seed 嵌套目录内容必须被拷入，且嵌套的伪 .git 目录必须被跳过。
+func TestCreateCopiesNestedSeed(t *testing.T) {
+	seed := t.TempDir()
+	write(t, seed, "src/nested/util.go", "package util\n")
+	write(t, seed, "sub/.git/Foo", "fake repo deep inside")
+
+	sb, cleanup, err := Create(seed)
+	defer cleanup()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(sb, "src", "nested", "util.go"))
+	if err != nil {
+		t.Fatalf("nested seed file not copied: %v", err)
+	}
+	if string(data) != "package util\n" {
+		t.Fatalf("nested file content mismatch: %q", data)
+	}
+	if _, err := os.Stat(filepath.Join(sb, "sub", ".git")); !os.IsNotExist(err) {
+		t.Fatalf("nested .git must be skipped, got stat err: %v", err)
+	}
+}
+
+// C2：并发调用 cleanup 不得有数据竞争（-race 验证），且目录只删一次。
+func TestCleanupConcurrent(t *testing.T) {
+	seed := t.TempDir()
+	write(t, seed, "a.txt", "hi")
+	sb, cleanup, err := Create(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cleanup()
+		}()
+	}
+	wg.Wait()
+	if _, err := os.Stat(sb); !os.IsNotExist(err) {
+		t.Fatal("sandbox not removed after concurrent cleanup")
 	}
 }

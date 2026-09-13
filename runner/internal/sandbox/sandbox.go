@@ -3,11 +3,15 @@
 package sandbox
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"sync"
+	"time"
 )
 
 // Create 新建临时目录并初始化为 git 仓库：
@@ -45,7 +49,7 @@ func Create(seedDir string) (string, func(), error) {
 	return sb, cleanup, nil
 }
 
-// copyTree 递归拷贝 src 到 dst，跳过 .git 与非常规文件（符号链接等）。
+// copyTree 递归拷贝 src 到 dst，跳过任意层级的 .git 与非常规文件（符号链接等）。
 func copyTree(src, dst string) error {
 	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -58,18 +62,16 @@ func copyTree(src, dst string) error {
 		if rel == "." {
 			return nil
 		}
-		// seed 自带的 .git 一律不拷贝，沙箱内使用全新仓库。
-		if rel == ".git" {
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
+		// seed 自带的 .git（任意层级，目录或普通文件形态）一律不拷贝，
+		// 沙箱内使用全新仓库。
+		if d.IsDir() && d.Name() == ".git" {
+			return filepath.SkipDir
+		}
+		if d.Name() == ".git" {
 			return nil
 		}
-		if !d.Type().IsRegular() {
-			// 符号链接、设备等非常规条目：文件直接跳过，目录连同子树跳过。
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
+		// 符号链接、设备等非常规条目：文件直接跳过，目录照常递归。
+		if !d.IsDir() && !d.Type().IsRegular() {
 			return nil
 		}
 		target := filepath.Join(dst, rel)
@@ -84,22 +86,34 @@ func copyTree(src, dst string) error {
 	})
 }
 
-// syncOnceRemove 返回幂等的目录清理函数。
+// syncOnceRemove 返回幂等且并发安全的目录清理函数。
 func syncOnceRemove(dir string) func() {
-	var done bool
+	var once sync.Once
 	return func() {
-		if done {
-			return
-		}
-		done = true
-		_ = os.RemoveAll(dir)
+		once.Do(func() { _ = os.RemoveAll(dir) })
 	}
 }
 
-// git 在 dir 中执行 git 子命令。
+// gitDefaultTimeout 是包内所有 git 调用的默认超时，防止 git 挂起卡死 Create。
+const gitDefaultTimeout = 60 * time.Second
+
+// git 在 dir 中执行 git 子命令：
+// - 统一注入 -c core.autocrlf=false -c commit.gpgsign=false，保证 diff 字节级确定
+//   且不继承宿主全局配置；
+// - 过滤 GIT_DIR/GIT_WORK_TREE 环境变量，避免误指到宿主仓库；
+// - 带 60s 超时。
 func git(dir string, args ...string) error {
-	cmd := exec.Command("git", args...)
+	ctx, cancel := context.WithTimeout(context.Background(), gitDefaultTimeout)
+	defer cancel()
+	full := append([]string{"-c", "core.autocrlf=false", "-c", "commit.gpgsign=false"}, args...)
+	cmd := exec.CommandContext(ctx, "git", full...)
 	cmd.Dir = dir
+	for _, e := range os.Environ() {
+		if k, _, ok := strings.Cut(e, "="); ok && (k == "GIT_DIR" || k == "GIT_WORK_TREE") {
+			continue
+		}
+		cmd.Env = append(cmd.Env, e)
+	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git %v: %w: %s", args, err, out)
