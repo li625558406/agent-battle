@@ -87,6 +87,28 @@ func TestBuildProfileEdge(t *testing.T) {
 	}
 }
 
+// TestBuildProfileSampleBoundary low_sample 边界：4 局标注、5 局不标注；
+// 满 50 局窗口不标注且样本量如实（规格 §3/§7）。
+func TestBuildProfileSampleBoundary(t *testing.T) {
+	mk := func(n int) []MatchMetrics {
+		ms := make([]MatchMetrics, n)
+		for i := range ms {
+			ms[i] = MatchMetrics{PassRatio: 1, AllPass: true, HasEvents: true, ToolCalls: 2, Tokens: 10, WallMS: 10}
+		}
+		return ms
+	}
+	base := mk(4)
+	if p := BuildProfile("A", "t", mk(4), base, 1); !p.LowSample {
+		t.Fatalf("4 局应标注 low_sample: %+v", p)
+	}
+	if p := BuildProfile("A", "t", mk(5), base, 1); p.LowSample {
+		t.Fatalf("5 局不应标注 low_sample: %+v", p)
+	}
+	if p := BuildProfile("A", "t", mk(50), mk(50), 1); p.LowSample || p.SampleSize != 50 {
+		t.Fatalf("满 50 局窗口: sample=%d low=%v", p.SampleSize, p.LowSample)
+	}
+}
+
 // saneDims 断言所有已产出的维 Score 在 [0,100] 且非 NaN。
 func saneDims(t *testing.T, p Profile) {
 	t.Helper()

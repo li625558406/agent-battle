@@ -3,6 +3,7 @@ package api
 import (
 	"archive/zip"
 	"bytes"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -16,12 +17,20 @@ import (
 	"testing"
 	"time"
 
+	_ "modernc.org/sqlite" // 故障注入测试用裸连接直改库文件
+
 	"agentbattle/platform/internal/store"
 )
 
 func newServerWithStore(t *testing.T) (*httptest.Server, *store.Store) {
 	t.Helper()
-	st, err := store.Open(filepath.Join(t.TempDir(), "api.db"))
+	return newServerWithStoreAt(t, filepath.Join(t.TempDir(), "api.db"))
+}
+
+// newServerWithStoreAt 允许指定库路径：故障注入测试需要裸连接直改同一库文件。
+func newServerWithStoreAt(t *testing.T, dbPath string) (*httptest.Server, *store.Store) {
+	t.Helper()
+	st, err := store.Open(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -571,5 +580,62 @@ func TestReadTaskType(t *testing.T) {
 	write("padded", `{"task_type": "  spaced  "}`)
 	if got := readTaskType(dir, "padded"); got != "spaced" {
 		t.Fatalf("空白裁剪失败: %q", got)
+	}
+}
+
+// TestRecomputeFailureDoesNotBlockSettlement 故障注入：画像落库表被毁时
+// 结算响应不受影响（重算失败仅 log 降级，规格 §5/§6 承诺）。
+// 用裸连接 DROP agent_profiles → 结算钩子里 Recompute 的 UpsertProfile 必败，
+// 断言结算照常完成（Elo/战绩落库）、响应正常；再重建空表验证画像确无写入。
+func TestRecomputeFailureDoesNotBlockSettlement(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "broken.db")
+	srv, _ := newServerWithStoreAt(t, dbPath)
+
+	// 第二条裸连接直改同一库文件（DSN 形态以 store.Open 为准，路径转 /）
+	dbsql, err := sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath)+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbsql.Close()
+	if _, err := dbsql.Exec(`DROP TABLE agent_profiles`); err != nil {
+		t.Fatal(err)
+	}
+
+	playMatch(t, srv, "fa", "fb") // 内部断言双侧上报均 200
+
+	// 结算确实完成且正确：天梯可见 Elo 1220/1180（首局 K=40）与战绩，
+	// 证明画像重算失败没有阻断结算事务
+	_, m := do(t, "GET", srv.URL+"/api/ladder", "", nil)
+	rows, _ := m["ladder"].([]any)
+	if len(rows) != 2 {
+		t.Fatalf("天梯行数 = %d, 期望 2", len(rows))
+	}
+	first, _ := rows[0].(map[string]any)
+	if first["name"] != "fa" || first["rating"].(float64) != 1220 || first["wins"].(float64) != 1 {
+		t.Fatalf("结算数据异常（重算失败不应影响结算）: %v", first)
+	}
+
+	// 重建空表后查询画像：upsert 失败 → 无任何画像写入，应为 200 空数组
+	if _, err := dbsql.Exec(`CREATE TABLE agent_profiles (
+		agent_id     INTEGER NOT NULL REFERENCES agents(id),
+		task_type    TEXT NOT NULL DEFAULT 'general',
+		sample_size  INTEGER NOT NULL DEFAULT 0,
+		profile_json TEXT NOT NULL,
+		updated_at   INTEGER NOT NULL,
+		PRIMARY KEY (agent_id, task_type)
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	resp, m := do(t, "GET", srv.URL+"/api/agents/fa/profile", "", nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("重算失败后画像查询应 200, got %d", resp.StatusCode)
+	}
+	b, _ := json.Marshal(m)
+	var pr profileResp
+	if err := json.Unmarshal(b, &pr); err != nil {
+		t.Fatal(err)
+	}
+	if len(pr.Profiles) != 0 {
+		t.Fatalf("表被毁期间结算不应写入任何画像: %+v", pr)
 	}
 }
