@@ -470,3 +470,30 @@ func TestExtractBundleCorruptZip(t *testing.T) {
 		t.Fatal("损坏的 zip 应返回错误")
 	}
 }
+
+// TestProfile 解析 /api/agents/{name}/profile 响应；路径转义防注入。
+func TestProfile(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"agent":"a/b","profiles":[`+
+			`{"task_type":"general","sample_size":2,`+
+			`"profile_json":"{\"dims\":{\"correctness\":{\"score\":75}}}",`+
+			`"updated_at":123}]}`)
+	}))
+	defer srv.Close()
+	profs, err := New(srv.URL).Profile("a/b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotPath != "/api/agents/a/b/profile" { // url.PathEscape 只转义 query 语义，Path 段内 / 保留
+		t.Fatalf("路径错误: %s", gotPath)
+	}
+	if len(profs) != 1 || profs[0].TaskType != "general" || profs[0].SampleSize != 2 {
+		t.Fatalf("解析错误: %+v", profs)
+	}
+	if !strings.Contains(profs[0].ProfileJSON, "correctness") {
+		t.Fatalf("profile_json 应原样透传: %q", profs[0].ProfileJSON)
+	}
+}

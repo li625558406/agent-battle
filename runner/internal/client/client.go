@@ -272,6 +272,28 @@ func ExtractBundle(zipBytes []byte, destDir string) error {
 	return nil
 }
 
+// StoredProfile 是平台返回的一条画像（ProfileJSON 为平台侧 profile 包
+// 序列化的 JSON，runner 不解释其内部结构——由 CLI 层按需解析）。
+type StoredProfile struct {
+	TaskType    string `json:"task_type"`
+	SampleSize  int    `json:"sample_size"`
+	ProfileJSON string `json:"profile_json"`
+	UpdatedAt   int64  `json:"updated_at"`
+}
+
+// Profile 拉取指定 agent 的全部画像（公开路由，无需 token）。
+func (c *Client) Profile(name string) ([]StoredProfile, error) {
+	var out struct {
+		Agent    string          `json:"agent"`
+		Profiles []StoredProfile `json:"profiles"`
+	}
+	path := "/api/agents/" + url.PathEscape(name) + "/profile"
+	if err := c.do(http.MethodGet, path, "", nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Profiles, nil
+}
+
 // GzipEvents 把事件流序列化为 NDJSON 并 gzip 压缩（上报用；
 // 事件仅含路径/操作类型，无文件内容明文——隐私红线见项目 CLAUDE.md）。
 func GzipEvents(events []protocol.Event) ([]byte, error) {

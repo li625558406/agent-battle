@@ -1,7 +1,8 @@
 // Command agentbattle 是本地 agent 对战 runner 的 CLI 壳。
 //
 // 子命令：run（单局对跑）、mirror（A/B 镜像对战）、sign（判分包签名）、
-// register（平台注册）、fetch（拉取任务包）、ladder（查看天梯）。
+// register（平台注册）、fetch（拉取任务包）、ladder（查看天梯）、
+// profile（查看能力画像）。
 package main
 
 import (
@@ -22,6 +23,7 @@ const usage = `agentbattle — 本地 agent 对战 runner
   agentbattle register --server URL --name X
   agentbattle fetch    --server URL --task <任务ID> --out DIR
   agentbattle ladder   --server URL
+  agentbattle profile  --server URL --name X
 `
 
 func main() {
@@ -43,6 +45,8 @@ func main() {
 		err = cmdFetch(os.Args[2:])
 	case "ladder":
 		err = cmdLadder(os.Args[2:])
+	case "profile":
+		err = cmdProfile(os.Args[2:])
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 		return
