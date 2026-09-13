@@ -135,6 +135,32 @@ func TestReviewFlow(t *testing.T) {
 		t.Fatalf("不存在对局应 404, got %d", resp.StatusCode)
 	}
 
+	// 经 API 的对抗上报：负 wall_ms / 越界 passed 进报告应被守卫
+	_, m3 := do(t, "POST", srv.URL+"/api/matches", tokA,
+		map[string]any{"task_id": "demo", "agent_a": "ra", "agent_b": "rb"})
+	mid3 := int64(m3["match_id"].(float64))
+	up3 := func(tok, side string, body map[string]any) {
+		t.Helper()
+		resp, _ := do(t, "POST", fmt.Sprintf("%s/api/matches/%d/results", srv.URL, mid3), tok, body)
+		if resp.StatusCode != 200 {
+			t.Fatalf("对抗上报 %s: %d", side, resp.StatusCode)
+		}
+	}
+	up3(tokA, "a", map[string]any{"side": "a", "passed": -5, "total": 0, "wall_ms": -1})
+	up3(tokB, "b", map[string]any{"side": "b", "passed": 1, "total": 2, "wall_ms": 50})
+	resp, m = do(t, "GET", fmt.Sprintf("%s/api/matches/%d/review", srv.URL, mid3), "", nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("对抗对局复盘: %d", resp.StatusCode)
+	}
+	b, _ = json.Marshal(m)
+	var rr3 reviewResp
+	if err := json.Unmarshal(b, &rr3); err != nil {
+		t.Fatal(err)
+	}
+	if rr3.Compare["pass_ratio"].A != 0 || rr3.Compare["wall_ms"].A != 0 {
+		t.Fatalf("对抗静态字段应被守卫: %+v", rr3.Compare)
+	}
+
 	// 409 × 2：pending 与 aborted
 	_, m2 := do(t, "POST", srv.URL+"/api/matches", tokA,
 		map[string]any{"task_id": "demo", "agent_a": "ra", "agent_b": "rb"})

@@ -199,4 +199,33 @@ func TestBuildReportAdversarial(t *testing.T) {
 	if ta := rep.Timeline["a"]; len(ta) != 1 || len(ta[0].Path) != 1024 {
 		t.Fatalf("超长 Note 应钳制到 1024: got %d", len(rep.Timeline["a"][0].Path))
 	}
+	// 时间线条数上限：compare/标注按全量算，timeline 截到 maxTimeline
+	var many []protocol.Event
+	for i := 0; i < 3000; i++ {
+		many = append(many, protocol.Event{Seq: i + 1, Type: protocol.EventToolCall, Tool: "bash"})
+	}
+	many = append(many, protocol.Event{Seq: 3001, Type: protocol.EventError})
+	rep = BuildReport(meta,
+		SideInput{Agent: "a", Passed: 1, Total: 1, EventsGZ: gz(t, many...)},
+		SideInput{Agent: "b", Passed: 1, Total: 1})
+	if len(rep.Timeline["a"]) != maxTimeline {
+		t.Fatalf("timeline 应截断到 %d: got %d", maxTimeline, len(rep.Timeline["a"]))
+	}
+	if rep.Compare.ToolCalls.A != 3000 || rep.Compare.Errors.A != 1 {
+		t.Fatalf("compare 应按全量事件计算: %+v", rep.Compare)
+	}
+	if mk := rep.Marks["a"]; len(mk) != 1 || mk[0].Seq != 3001 {
+		t.Fatalf("截断窗口外的 first_error 仍应标注: %+v", mk)
+	}
+	// Tool 超长钳制 + 未知 Type 归一 other
+	rep = BuildReport(meta,
+		SideInput{Agent: "a", Passed: 1, Total: 1,
+			EventsGZ: gz(t,
+				protocol.Event{Seq: 1, Type: "weird-type", Tool: strings.Repeat("t", 300)},
+				protocol.Event{Seq: 2, Type: protocol.EventToolCall, Tool: "go"})},
+		SideInput{Agent: "b", Passed: 1, Total: 1})
+	ta = rep.Timeline["a"]
+	if ta[0].Type != "other" || len(ta[0].Tool) != 128 {
+		t.Fatalf("未知 Type 应归一 other、Tool 应钳 128: %+v", ta[0])
+	}
 }

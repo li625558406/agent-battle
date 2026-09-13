@@ -6,9 +6,17 @@
 package review
 
 import (
+	"strings"
+
 	"agentbattle/platform/internal/profile"
 	"agentbattle/protocol"
 )
+
+// maxTimeline 单侧时间线展示条数上限。compare 指标与 first_error 标注按
+// 全量事件计算（口径不受影响），仅展示层截断——公开路由的响应大小有界，
+// 防恶意超长事件流（16MB 解压上限内可有数十万条）经 GET 复盘放大为
+// 数十 MB 响应。
+const maxTimeline = 2000
 
 // Meta 对局元信息（api 层经 store.MatchByID/TaskTypeOf 读出后传入）。
 type Meta struct {
@@ -104,24 +112,37 @@ type sideStats struct {
 // 时间线、first_error 标注与计数。
 func buildSide(in SideInput) (SideMeta, []TlEvent, []Mark, sideStats) {
 	events := profile.DecodeEvents(in.EventsGZ)
-	m := profile.ExtractMetrics(events, in.Passed, in.Total, in.WallMS)
+	wallMS := in.WallMS
+	if wallMS < 0 { // 静态字段与事件字段同一不可信口径：负耗时归零
+		wallMS = 0
+	}
+	m := profile.ExtractMetrics(events, in.Passed, in.Total, wallMS)
 	meta := SideMeta{
 		Agent: in.Agent, Passed: in.Passed, Total: in.Total,
-		WallMS: in.WallMS, HasEvents: len(events) > 0,
+		WallMS: wallMS, HasEvents: len(events) > 0,
 	}
 	tl := make([]TlEvent, 0, len(events))
 	marks := []Mark{}
 	st := sideStats{
 		passRatio: m.PassRatio, toolCalls: m.ToolCalls,
-		tokens: m.Tokens, wallMS: in.WallMS,
+		tokens: m.Tokens, wallMS: wallMS,
 	}
 	firstErr := true
 	for _, e := range events {
 		te := TlEvent{Seq: e.Seq, TS: e.TS, Type: e.Type, Tool: e.Tool}
+		if len(te.Tool) > 128 { // 公开展示面：钳制任意长 Tool 串
+			te.Tool = te.Tool[:128]
+		}
+		switch te.Type { // Type 白名单：未知类型归一 other，不透传任意串
+		case protocol.EventToolCall, protocol.EventFileEdit,
+			protocol.EventMessage, protocol.EventError, protocol.EventResult:
+		default:
+			te.Type = "other"
+		}
 		if e.Type == protocol.EventFileEdit {
 			te.Path = e.Note
 			if len(te.Path) > 1024 { // 公开展示面：钳制超长 Note，防自洩放大
-				te.Path = te.Path[:1024]
+				te.Path = strings.ToValidUTF8(te.Path[:1024], "")
 			}
 			st.edits++
 		}
@@ -131,7 +152,9 @@ func buildSide(in SideInput) (SideMeta, []TlEvent, []Mark, sideStats) {
 		if e.DurationMS > 0 {
 			te.DurationMS = e.DurationMS
 		}
-		tl = append(tl, te)
+		if len(tl) < maxTimeline {
+			tl = append(tl, te)
+		}
 		if e.Type == protocol.EventError {
 			st.errors++
 			if firstErr {
