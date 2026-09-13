@@ -228,9 +228,12 @@ func extractToken(t *testing.T, out string) string {
 // waitHTTP 轮询直到 url 返回 200，30s 超时（留足 server 冷启动余量）。
 func waitHTTP(t *testing.T, url string) {
 	t.Helper()
+	// 带单次请求超时：防 server 半就绪（bind 成功但 handler 挂死）时
+	// 单次 Get 无限阻塞使 30s deadline 失效。
+	client := &http.Client{Timeout: 2 * time.Second}
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
-		resp, err := http.Get(url)
+		resp, err := client.Get(url)
 		if err == nil {
 			resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
