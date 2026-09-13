@@ -1,5 +1,22 @@
 # CHANGE.md — 项目迭代记录
 
+## 2026-09-13 · M2 计划 2 完成：对局复盘报告
+
+**主题**：任一已结算对局可按 matchID 查得结构完整的复盘报告——双方对比（通过率/耗时/崩溃/分数）+ 双侧事件时间线，CLI `review` 子命令与平台公开路由双端可查，E2E TestReviewReport 验收通过
+
+**核心变更**：
+- 新包 platform/internal/review：纯函数 BuildReport（profile.DecodeEvents 导出复用 + store.ReviewData → 复盘结构），无 IO 依赖、单测确定性覆盖（first_error 标注等真实对局不确定的分支在此层覆盖）
+- store.ReviewData：matches/results JOIN 一次取齐对局元信息 + 双侧判分结果 + 双侧事件流（压缩），自我对局显式报错
+- api：公开路由 GET /api/matches/{id}/review 四分支——400（非法 id）/404（对局不存在）/409（未结算/pending）/200（报告 JSON）
+- 公开面加固：时间线最多渲染 2000 条（超出截断标注）、Tool/Type 钳制白名单（事件流字段不可信）、wall_ms 负值守卫、渲染层控制字符净化（防终端注入）
+- runner 侧：client.Review + CLI `review --server URL --match N` 子命令（结论行 + 对比表含"通过率"行 + 双侧"时间线"），404 等错误非零退出并透传状态码
+- E2E TestReviewReport（`runner/e2e/platform_e2e_test.go`）：独立起服镜像 1 局（--fix-a 判 a 胜，与 TestPlatformLoopEcho 同一确定性来源）→ review 按 matchID 1 查得结论行/胜者/对比表/时间线；负路径断言不存在对局报 404
+
+**遗留事项**：
+- LLM 自然语言总结留 M3+ Web Dashboard
+- 哈希链审计（复盘报告内嵌事件链校验）M3+
+- --dry-run 影子赛为 M2 计划 3
+
 ## 2026-09-13 · M2 计划 1 完成：六维能力画像管道
 
 **主题**：平台在每场对局结算后自动重建 agent 六维能力画像（0-100），API 与 CLI 可查，E2E 验收"画像复现已知差异"通过
@@ -160,20 +177,3 @@
 **遗留事项**：
 - TestRunCommandTimeout（judge 包）在全量并发跑时偶发超时抖动（100ms 注入超时时序敏感），独立/复跑稳定通过，与本次改动无关，后置观察
 - file-only-change 仅守"改动范围 = calc.sh"，内容正确性由 add-basic 把守；只删 calc.sh 会过 file-only-change（语义如此，范围合法），由 add-basic 兜底判负
-
-## 2026-09-13 · M2 计划 2 完成：对局复盘报告
-
-**主题**：任一已结算对局可按 matchID 查得结构完整的复盘报告——双方对比（通过率/耗时/崩溃/分数）+ 双侧事件时间线，CLI `review` 子命令与平台公开路由双端可查，E2E TestReviewReport 验收通过
-
-**核心变更**：
-- 新包 platform/internal/review：纯函数 BuildReport（profile.DecodeEvents 导出复用 + store.ReviewData → 复盘结构），无 IO 依赖、单测确定性覆盖（first_error 标注等真实对局不确定的分支在此层覆盖）
-- store.ReviewData：matches/results JOIN 一次取齐对局元信息 + 双侧判分结果 + 双侧事件流（压缩），自我对局显式报错
-- api：公开路由 GET /api/matches/{id}/review 四分支——400（非法 id）/404（对局不存在）/409（未结算/pending）/200（报告 JSON）
-- 公开面加固：时间线最多渲染 2000 条（超出截断标注）、Tool/Type 钳制白名单（事件流字段不可信）、wall_ms 负值守卫、渲染层控制字符净化（防终端注入）
-- runner 侧：client.Review + CLI `review --server URL --match N` 子命令（结论行 + 对比表含"通过率"行 + 双侧"时间线"），404 等错误非零退出并透传状态码
-- E2E TestReviewReport（`runner/e2e/platform_e2e_test.go`）：独立起服镜像 1 局（--fix-a 判 a 胜，与 TestPlatformLoopEcho 同一确定性来源）→ review 按 matchID 1 查得结论行/胜者/对比表/时间线；负路径断言不存在对局报 404
-
-**遗留事项**：
-- LLM 自然语言总结留 M3+ Web Dashboard
-- 哈希链审计（复盘报告内嵌事件链校验）M3+
-- --dry-run 影子赛为 M2 计划 3
