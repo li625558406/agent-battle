@@ -7,7 +7,7 @@
     },
     {
       "name": "file-only-change",
-      "cmd": "bash -c 'n=$(git status --porcelain | grep -cv \" \\.gitignore$\"); [ \"$n\" -le 1 ] && { [ \"$n\" -eq 0 ] || git status --porcelain | grep -v \" \\.gitignore$\" | grep -q \" calc\\.sh$\"; } && [ \"$(git rev-list --count HEAD)\" = \"1\" ]'"
+      "cmd": "bash -c 'n=$(git status --porcelain | grep -cv \" \\.gitignore$\"); [ \"$n\" -le 1 ] && { [ \"$n\" -eq 0 ] || git status --porcelain | grep -v \" \\.gitignore$\" | grep -q \" calc\\.sh$\"; } && [ \"$(git rev-list --count HEAD)\" = \"1\" ] && [ \"$(git rev-parse HEAD)\" = \"$AGENTBATTLE_BASELINE_SHA\" ]'"
     }
   ]
 }

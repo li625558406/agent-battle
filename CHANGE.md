@@ -1,5 +1,21 @@
 # CHANGE.md — 项目迭代记录
 
+## 2026-09-13 · 基线 SHA 注入防 amend 架空（M1 runner-core）
+
+**主题**：复审发现 `examples/fix-add` file-only-change 可被 `git commit --amend` 架空——agent 改 calc.sh 后 amend 根 commit，工作树干净 + `rev-list --count HEAD` 仍为 1，双测试全过且 DiffHash 与诚实零改动不可区分
+
+**核心变更**：
+- 修复原理：agent 无法伪造的基线只有执行环境自己记得的值——session 在 agent 启动**前**经 `sandbox.HeadRev` 记录 HEAD SHA，判分时校验 HEAD 未变
+- sandbox 新增导出函数 `HeadRev(repoPath)`（git rev-parse HEAD，复用包内 60s 超时与 GIT_DIR/GIT_WORK_TREE 过滤，env 过滤抽取为共享 `gitEnv()` 助手）；Create 签名不变；测试覆盖 40 位 SHA 与非 git 目录报错
+- judge `Run` 签名追加 `baselineSHA string`（`Run(taskDir, sandbox, baselineSHA, key)`），非空时以 `AGENTBATTLE_BASELINE_SHA` 注入每条判分命令环境（env 由 judge 进程构造，agent 进程已退出无法影响）；空串不注入（向后兼容）；新增 TestRunInjectsBaselineSHA / TestRunDetectsAmendedHistory / TestRunEmptyBaselineNoInjection，既有测试全量传入真实基线
+- session.Run 在 sandbox.Create 之后、Launch 之前调 `sandbox.HeadRev` 记录基线（失败即终止本局——无可信基线则判分不可信），传给 judge.Run
+- `examples/fix-add` manifest file-only-change 命令追加 `&& [ "$(git rev-parse HEAD)" = "$AGENTBATTLE_BASELINE_SHA" ]`（bash -c 单引号内部），已重签名
+- 对抗验证 6 场景实测：诚实零改动 PASS、只改 calc.sh PASS、**改 calc.sh + amend FAIL（漏洞关闭）**、改 calc.sh + 普通 commit FAIL、夹带 untracked FAIL、删除 .git FAIL
+
+**遗留事项**：
+- 已知残余攻击面：agent 删整个 .git → rev-parse 失败 → 判负（可接受）；agent 无法改判分进程的 env（judge 在 agent 退出后自行注入）；`git reset --hard <伪造>` 无法绕过（HEAD SHA 由沙箱真实对象库决定，回退到基线 SHA 本身不产生 diff 也拿不到分）
+- 老判分包（manifest 未引用 AGENTBATTLE_BASELINE_SHA）不受影响：env 注入无害，行为与之前一致
+
 ## 2026-09-13 · 示例任务 + CLI + 镜像对战（M1 runner-core, Task 10-12）
 
 **主题**：`examples/fix-add` 示例任务、`agentbattle` CLI（run/mirror/sign）、session 镜像对战
