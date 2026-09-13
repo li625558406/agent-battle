@@ -37,8 +37,9 @@ func findRepoRoot(t *testing.T) string {
 // TestFullLoopEcho 验证核心闭环：examples/fix-add 任务下，携带正确修复的
 // Echo（A）对阵不修复的 Echo（B），跑 2 局。A 的修复用位置参数
 // $1 $2（与 seed/calc.sh 签名一致）；B 不写文件（Echo 语义：FixContent
-// 为空则不落盘），保留 seed 的 a-b bug。每局 add-basic 判 A 2/2、B 1/2
-// （B 恰好靠 add(10,-4)=2-(-4)=6 过一条），A 按通过比例必胜，WinsA==2
+// 为空则不落盘），保留 seed 的 a-b bug。每局判分 A 2/2、B 1/2（B 的
+// add-basic 失败：add(2,3)=-1、add(10,-4)=14 均不符；1 分来自
+// file-only-change 零改动路径），A 按通过比例必胜，WinsA==2
 // 确定性成立。
 func TestFullLoopEcho(t *testing.T) {
 	taskDir := filepath.Join(findRepoRoot(t), "examples", "fix-add")
