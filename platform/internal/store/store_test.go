@@ -508,3 +508,54 @@ func TestProfileUpsertAndList(t *testing.T) {
 		t.Fatalf("未知 agent 应返回空列表而非错误: %v", err)
 	}
 }
+
+// TestReviewData 双侧 JOIN 取数、缺行零值兜底、不存在对局报错。
+func TestReviewData(t *testing.T) {
+	s := openTest(t)
+	a1, _ := s.CreateAgent("r1")
+	a2, _ := s.CreateAgent("r2")
+
+	// 已结算对局：双侧齐全
+	m1, err := s.CreateMatch("tk", "general", a1.ID, a2.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddResult(m1, "a", Result{Passed: 2, Total: 2, WallMS: 100, EventsGZ: []byte("gza")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddResult(m1, "b", Result{Passed: 1, Total: 2, WallMS: 200, EventsGZ: []byte("gzb")}); err != nil {
+		t.Fatal(err)
+	}
+	sa, sb, err := s.ReviewData(m1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sa.AgentID != a1.ID || sa.Agent != "r1" || sa.Passed != 2 || sa.Total != 2 ||
+		sa.WallMS != 100 || string(sa.EventsGZ) != "gza" {
+		t.Fatalf("sideA 不符: %+v", sa)
+	}
+	if sb.AgentID != a2.ID || sb.Agent != "r2" || sb.Passed != 1 || sb.Total != 2 ||
+		sb.WallMS != 200 || string(sb.EventsGZ) != "gzb" {
+		t.Fatalf("sideB 不符: %+v", sb)
+	}
+
+	// pending 对局只有 a 侧：b 侧 agent 名照常、结果零值（LEFT JOIN 兜底）
+	m2, err := s.CreateMatch("tk", "general", a1.ID, a2.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddResult(m2, "a", Result{Passed: 1, Total: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if _, sb, err = s.ReviewData(m2); err != nil {
+		t.Fatal(err)
+	}
+	if sb.Agent != "r2" || sb.Passed != 0 || sb.Total != 0 || sb.WallMS != 0 || sb.EventsGZ != nil {
+		t.Fatalf("缺行侧应零值兜底: %+v", sb)
+	}
+
+	// 不存在的对局 → 错误
+	if _, _, err := s.ReviewData(99999); err == nil {
+		t.Fatal("不存在的对局应报错")
+	}
+}
