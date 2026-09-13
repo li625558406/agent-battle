@@ -554,6 +554,15 @@ func TestReviewData(t *testing.T) {
 		t.Fatalf("缺行侧应零值兜底: %+v", sb)
 	}
 
+	// 自我对局（api 层禁止但 store 不拦）：JOIN 仅 1 行 → 显式报错
+	m3, err := s.CreateMatch("tk", "general", a1.ID, a1.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.ReviewData(m3); err == nil {
+		t.Fatal("自我对局双侧数据不全应报错")
+	}
+
 	// 不存在的对局 → 错误
 	if _, _, err := s.ReviewData(99999); err == nil {
 		t.Fatal("不存在的对局应报错")
