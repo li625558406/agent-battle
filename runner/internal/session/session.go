@@ -39,6 +39,12 @@ type Result struct {
 
 // Run 执行一局。沙箱在结束后删除工作副本，报告目录保留。
 func Run(ctx context.Context, cfg Config) (Result, error) {
+	if cfg.Adapter == nil {
+		return Result{}, fmt.Errorf("Adapter 未设置")
+	}
+	if cfg.Timeout < 0 {
+		return Result{}, fmt.Errorf("Timeout 不能为负: %s", cfg.Timeout)
+	}
 	task, err := loadTask(cfg.TaskDir)
 	if err != nil {
 		return Result{}, err
@@ -68,34 +74,75 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 
 	start := time.Now()
 	go func() {
-		execDone <- cfg.Adapter.Launch(runCtx, sb, task.Description, cfg.Env, events)
+		err := cfg.Adapter.Launch(runCtx, sb, task.Description, cfg.Env, events)
+		// 先发 execDone 再 close(events)：保证主循环先拿到错误，
+		// 再观察到渠道关闭（契约：out 由调用方 close，Launch 返回后不再有 send）。
+		execDone <- err
+		close(events)
 	}()
+
+	// classify 归类失败原因：runCtx 已取消/超时（含 adapter 遵守 ctx 返回
+	// context.DeadlineExceeded 的情况）按超时/取消报告，否则按 agent 执行失败。
+	classify := func(launchErr error) error {
+		if runCtx.Err() != nil {
+			if ctx.Err() != nil {
+				return fmt.Errorf("对局上下文被取消: %w", ctx.Err())
+			}
+			return fmt.Errorf("agent 执行超时(%s)", timeout)
+		}
+		return fmt.Errorf("agent 执行失败: %w", launchErr)
+	}
+	// fail 统一处理崩溃/超时路径：补记 EventError 并把已采集事件落盘取证。
+	fail := func(execErr error) (Result, error) {
+		col.Add(adapter.RawEvent{Type: protocol.EventError, Note: "agent 异常退出"})
+		dir, werr := writeReport(cfg, task, protocol.JudgeReport{}, col,
+			time.Since(start).Milliseconds(), execErr)
+		if werr != nil {
+			// 落盘失败不掩盖原始错误
+			return Result{}, fmt.Errorf("%w（另：取证报告写入失败: %v）", execErr, werr)
+		}
+		return Result{Dir: dir}, execErr
+	}
 
 agentLoop:
 	for {
 		select {
 		case raw, ok := <-events:
 			if !ok {
+				// close 在 execDone 发送之后执行，能观察到关闭说明 execDone 必有值
+				if err := <-execDone; err != nil {
+					return fail(classify(err))
+				}
 				break agentLoop
 			}
 			col.Add(raw)
 		case err := <-execDone:
-			if err != nil {
-				col.Add(adapter.RawEvent{Type: protocol.EventError, Note: "agent 异常退出"})
-				return Result{}, fmt.Errorf("agent 执行失败: %w", err)
+			// Launch 已返回，events 随即关闭；排干剩余缓冲事件
+			for raw := range events {
+				col.Add(raw)
 			}
-			// 渠道里可能还有缓冲事件，排干
+			if err != nil {
+				return fail(classify(err))
+			}
+			break agentLoop
+		case <-runCtx.Done():
+			// 超时/取消：尽力排干已缓冲事件用于取证。
+			// Launch 仍在运行，不能 close(events)；返回后 defer cancel()
+			// 使 runCtx 取消，adapter 按契约杀死 agent 进程，Launch 返回，
+			// goroutine 写入缓冲容量为 1 的 execDone 并 close(events) 后结束，不泄漏。
+		drain:
 			for {
 				select {
 				case raw, ok := <-events:
 					if !ok {
-						break agentLoop
+						break drain
 					}
 					col.Add(raw)
 				default:
-					break agentLoop
+					break drain
 				}
 			}
+			return fail(classify(nil))
 		}
 	}
 	wall := time.Since(start).Milliseconds()
@@ -105,7 +152,7 @@ agentLoop:
 		return Result{}, fmt.Errorf("判分失败: %w", err)
 	}
 
-	dir, err := writeReport(cfg, task, rep, col, wall)
+	dir, err := writeReport(cfg, task, rep, col, wall, nil)
 	if err != nil {
 		return Result{}, err
 	}
@@ -124,8 +171,10 @@ func loadTask(taskDir string) (protocol.TaskManifest, error) {
 	return t, nil
 }
 
+// writeReport 落盘报告。execErr 非 nil 表示崩溃/超时路径：
+// 未执行判分，passed/total 记零值，并在 summary 中附带错误信息供取证。
 func writeReport(cfg Config, task protocol.TaskManifest, rep protocol.JudgeReport,
-	col *collector.Collector, wallMS int64) (string, error) {
+	col *collector.Collector, wallMS int64, execErr error) (string, error) {
 	out := cfg.OutDir
 	if out == "" {
 		out = filepath.Join(os.TempDir(), "agentbattle-reports")
@@ -137,6 +186,9 @@ func writeReport(cfg Config, task protocol.TaskManifest, rep protocol.JudgeRepor
 	summary := map[string]interface{}{
 		"task_id": task.TaskID, "label": cfg.Label, "wall_ms": wallMS,
 		"passed": rep.Passed, "total": rep.Total,
+	}
+	if execErr != nil {
+		summary["error"] = execErr.Error()
 	}
 	b, _ := json.MarshalIndent(summary, "", "  ")
 	if err := os.WriteFile(filepath.Join(dir, "report.json"), b, 0o644); err != nil {
