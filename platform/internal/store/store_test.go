@@ -44,7 +44,7 @@ func TestMatchSettleWin(t *testing.T) {
 	s := openTest(t)
 	a, _ := s.CreateAgent("A")
 	b, _ := s.CreateAgent("B")
-	mid, err := s.CreateMatch("fix-add", a.ID, b.ID)
+	mid, err := s.CreateMatch("fix-add", "general", a.ID, b.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +72,7 @@ func TestMatchSettleTieAndDoubleZero(t *testing.T) {
 	s := openTest(t)
 	a, _ := s.CreateAgent("A2")
 	b, _ := s.CreateAgent("B2")
-	mid, _ := s.CreateMatch("fix-add", a.ID, b.ID)
+	mid, _ := s.CreateMatch("fix-add", "general", a.ID, b.ID)
 	_, _ = s.AddResult(mid, "a", Result{Passed: 0, Total: 2, WallMS: 10})
 	_, err := s.AddResult(mid, "b", Result{Passed: 0, Total: 2, WallMS: 999})
 	if err != nil {
@@ -90,7 +90,7 @@ func TestLadderOrder(t *testing.T) {
 	s := openTest(t)
 	a, _ := s.CreateAgent("winner")
 	b, _ := s.CreateAgent("loser")
-	mid, _ := s.CreateMatch("fix-add", a.ID, b.ID)
+	mid, _ := s.CreateMatch("fix-add", "general", a.ID, b.ID)
 	_, _ = s.AddResult(mid, "a", Result{Passed: 2, Total: 2, WallMS: 100})
 	_, _ = s.AddResult(mid, "b", Result{Passed: 0, Total: 2, WallMS: 100})
 	rows, err := s.Ladder()
@@ -106,7 +106,7 @@ func TestAddResultRejectsBadSideAndDuplicate(t *testing.T) {
 	s := openTest(t)
 	a, _ := s.CreateAgent("A3")
 	b, _ := s.CreateAgent("B3")
-	mid, _ := s.CreateMatch("fix-add", a.ID, b.ID)
+	mid, _ := s.CreateMatch("fix-add", "general", a.ID, b.ID)
 	if _, err := s.AddResult(mid, "c", Result{}); err == nil {
 		t.Fatal("bad side must fail")
 	}
@@ -169,7 +169,7 @@ func TestSettleIdempotent(t *testing.T) {
 	s := openTest(t)
 	a, _ := s.CreateAgent("A")
 	b, _ := s.CreateAgent("B")
-	mid, _ := s.CreateMatch("fix-add", a.ID, b.ID)
+	mid, _ := s.CreateMatch("fix-add", "general", a.ID, b.ID)
 	if _, err := s.AddResult(mid, "a", Result{Passed: 2, Total: 2, WallMS: 100}); err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +194,7 @@ func TestSettleConcurrentReports(t *testing.T) {
 	a, _ := s.CreateAgent("A")
 	b, _ := s.CreateAgent("B")
 	for i := 0; i < 10; i++ {
-		mid, err := s.CreateMatch("fix-add", a.ID, b.ID)
+		mid, err := s.CreateMatch("fix-add", "general", a.ID, b.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -228,9 +228,9 @@ func TestSweepStaleMatches(t *testing.T) {
 	s := openTest(t)
 	a, _ := s.CreateAgent("A")
 	b, _ := s.CreateAgent("B")
-	old1, _ := s.CreateMatch("fix-add", a.ID, b.ID)
-	old2, _ := s.CreateMatch("fix-add", a.ID, b.ID)
-	fresh, _ := s.CreateMatch("fix-add", a.ID, b.ID)
+	old1, _ := s.CreateMatch("fix-add", "general", a.ID, b.ID)
+	old2, _ := s.CreateMatch("fix-add", "general", a.ID, b.ID)
+	fresh, _ := s.CreateMatch("fix-add", "general", a.ID, b.ID)
 
 	// old1/old2 的 created_at 拨回 2 小时前（模拟 mirror 中止遗留的孤儿）
 	past := time.Now().Add(-2 * time.Hour).Unix()
@@ -272,7 +272,7 @@ func TestSettleParallelMatches(t *testing.T) {
 	b, _ := s.CreateAgent("B")
 	ids := make([]int64, n)
 	for i := range ids {
-		mid, err := s.CreateMatch("fix-add", a.ID, b.ID)
+		mid, err := s.CreateMatch("fix-add", "general", a.ID, b.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -305,5 +305,118 @@ func TestSettleParallelMatches(t *testing.T) {
 	}
 	if ga.Wins != n || gb.Losses != n {
 		t.Fatalf("胜负统计异常: A wins=%d B losses=%d (应均为 %d)", ga.Wins, gb.Losses, n)
+	}
+}
+
+// ---------- M2 画像：task_type 列与 agent_profiles ----------
+
+// TestMatchTaskType 验证 task_type 经 CreateMatch 落库并可经 TaskTypeOf 回读；
+// 空串落库时归一为 general。
+func TestMatchTaskType(t *testing.T) {
+	s := openTest(t)
+	// 适配：库开启 foreign_keys，硬编码 agent id(1,2) 会触发外键约束，
+	// 故创建真实 agent 后用其 ID。
+	a, _ := s.CreateAgent("fk1")
+	b, _ := s.CreateAgent("fk2")
+	id1, err := s.CreateMatch("task-x", "debug", a.ID, b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id2, err := s.CreateMatch("task-y", "", a.ID, b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tt, _ := s.TaskTypeOf(id1); tt != "debug" {
+		t.Fatalf("task_type = %q, 期望 debug", tt)
+	}
+	if tt, _ := s.TaskTypeOf(id2); tt != "general" {
+		t.Fatalf("空 task_type 应归一为 general, got %q", tt)
+	}
+	if _, err := s.TaskTypeOf(999); err == nil {
+		t.Fatal("不存在的对局应报错")
+	}
+}
+
+// TestProfileWindowAndBaseline 验证自身窗口（按 agent+task_type 过滤、仅
+// done、按结算时间倒序）与基线（该 task_type 全体 agent）的过滤语义。
+func TestProfileWindowAndBaseline(t *testing.T) {
+	s := openTest(t)
+	a1, _ := s.CreateAgent("w1")
+	a2, _ := s.CreateAgent("w2")
+
+	mk := func(taskType string, agentA, agentB int64) int64 {
+		t.Helper()
+		id, err := s.CreateMatch("tk", taskType, agentA, agentB)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	res := func(mid int64, side string, gz []byte) {
+		t.Helper()
+		if _, err := s.AddResult(mid, side, Result{
+			Passed: 1, Total: 2, EventsGZ: gz}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 三场 done：两场 debug（a1 与 a2 各一场自身视角），一场 general
+	m1, m2, m3 := mk("debug", a1.ID, a2.ID), mk("debug", a1.ID, a2.ID), mk("general", a1.ID, a2.ID)
+	res(m1, "a", nil)
+	res(m1, "b", nil)
+	res(m2, "a", []byte("gz2"))
+	res(m2, "b", nil)
+	res(m3, "a", nil)
+	res(m3, "b", nil)
+
+	own, err := s.ProfileWindow(a1.ID, "debug", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(own) != 2 {
+		t.Fatalf("a1 debug 窗口应 2 局（general 不计入）, got %d", len(own))
+	}
+	if string(own[0].EventsGZ) != "gz2" {
+		t.Fatalf("窗口应按结算时间倒序（m2 在前）, got %q", own[0].EventsGZ)
+	}
+	base, err := s.ProfileBaseline("debug", 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(base) != 4 { // 两场 debug × 双侧
+		t.Fatalf("debug 基线应 4 条, got %d", len(base))
+	}
+	if empty, _ := s.ProfileWindow(a2.ID, "nonexist", 50); len(empty) != 0 {
+		t.Fatalf("无数据 task_type 窗口应为空, got %d", len(empty))
+	}
+}
+
+// TestProfileUpsertAndList 验证 agent_profiles 覆盖式 upsert 与按名列举。
+func TestProfileUpsertAndList(t *testing.T) {
+	s := openTest(t)
+	a, _ := s.CreateAgent("pu")
+	if err := s.UpsertProfile(a.ID, "debug", 2, `{"v":1}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpsertProfile(a.ID, "debug", 3, `{"v":2}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpsertProfile(a.ID, "general", 1, `{"v":3}`); err != nil {
+		t.Fatal(err)
+	}
+	ps, err := s.ProfilesByAgent("pu")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ps) != 2 {
+		t.Fatalf("应 2 个 task_type 各一条, got %d", len(ps))
+	}
+	if ps[0].TaskType != "debug" || ps[0].SampleSize != 3 || ps[0].ProfileJSON != `{"v":2}` {
+		t.Fatalf("upsert 应覆盖且按 task_type 排序: %+v", ps[0])
+	}
+	if ps[1].TaskType != "general" {
+		t.Fatalf("第二行应为 general: %+v", ps[1])
+	}
+	if _, err := s.ProfilesByAgent("nobody"); err != nil {
+		t.Fatalf("未知 agent 应返回空列表而非错误: %v", err)
 	}
 }

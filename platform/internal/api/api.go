@@ -147,7 +147,7 @@ func (s *Server) handleCreateMatch(w http.ResponseWriter, r *http.Request, ag st
 		writeErr(w, http.StatusBadRequest, "agent_b 不存在: "+body.AgentB)
 		return
 	}
-	id, err := s.St.CreateMatch(body.TaskID, a.ID, b.ID)
+	id, err := s.St.CreateMatch(body.TaskID, "general", a.ID, b.ID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "创建对局失败")
 		return

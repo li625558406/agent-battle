@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -36,6 +37,7 @@ CREATE TABLE IF NOT EXISTS agents (
 CREATE TABLE IF NOT EXISTS matches (
 	id         INTEGER PRIMARY KEY AUTOINCREMENT,
 	task_id    TEXT NOT NULL,
+	task_type  TEXT NOT NULL DEFAULT 'general',
 	agent_a    INTEGER NOT NULL REFERENCES agents(id),
 	agent_b    INTEGER NOT NULL REFERENCES agents(id),
 	status     TEXT NOT NULL DEFAULT 'pending',
@@ -52,6 +54,14 @@ CREATE TABLE IF NOT EXISTS results (
 	diff_hash TEXT NOT NULL DEFAULT '',
 	events_gz BLOB,
 	PRIMARY KEY (match_id, side)
+);
+CREATE TABLE IF NOT EXISTS agent_profiles (
+	agent_id     INTEGER NOT NULL REFERENCES agents(id),
+	task_type    TEXT NOT NULL DEFAULT 'general',
+	sample_size  INTEGER NOT NULL DEFAULT 0,
+	profile_json TEXT NOT NULL,
+	updated_at   INTEGER NOT NULL,
+	PRIMARY KEY (agent_id, task_type)
 );`
 
 // Open 打开（必要时创建）SQLite 库并建表。
@@ -68,6 +78,13 @@ func Open(path string) (*Store, error) {
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("建表: %w", err)
+	}
+	// 旧库迁移：M1 时期的 matches 表没有 task_type 列。已存在时 ALTER 会报
+	// "duplicate column name"，属预期，静默忽略；其余错误如实上抛。
+	if _, err := db.Exec(`ALTER TABLE matches ADD COLUMN task_type TEXT NOT NULL DEFAULT 'general'`); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column name") {
+		db.Close()
+		return nil, fmt.Errorf("迁移 matches.task_type: %w", err)
 	}
 	return &Store{db: db}, nil
 }
@@ -130,14 +147,24 @@ func (s *Store) AgentByID(id int64) (Agent, error) {
 	return scanAgent(s.db.QueryRow(`SELECT `+agentCols+` FROM agents WHERE id = ?`, id))
 }
 
-func (s *Store) CreateMatch(taskID string, agentA, agentB int64) (int64, error) {
+func (s *Store) CreateMatch(taskID, taskType string, agentA, agentB int64) (int64, error) {
+	if taskType == "" {
+		taskType = "general"
+	}
 	res, err := s.db.Exec(
-		`INSERT INTO matches (task_id, agent_a, agent_b, created_at) VALUES (?, ?, ?, ?)`,
-		taskID, agentA, agentB, time.Now().Unix())
+		`INSERT INTO matches (task_id, task_type, agent_a, agent_b, created_at) VALUES (?, ?, ?, ?, ?)`,
+		taskID, taskType, agentA, agentB, time.Now().Unix())
 	if err != nil {
 		return 0, err
 	}
 	return res.LastInsertId()
+}
+
+// TaskTypeOf 返回对局的任务类型（画像按 task_type 分池）。
+func (s *Store) TaskTypeOf(matchID int64) (string, error) {
+	var tt string
+	err := s.db.QueryRow(`SELECT task_type FROM matches WHERE id = ?`, matchID).Scan(&tt)
+	return tt, err
 }
 
 // MatchByID 返回对局元信息（供 API 层校验上报方归属）。
@@ -362,6 +389,101 @@ func (s *Store) Ladder() ([]Agent, error) {
 			return nil, err
 		}
 		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// ProfileMatch 是画像窗口中的一局（某 agent 视角的本方结果）。
+type ProfileMatch struct {
+	Passed, Total int
+	WallMS        int64
+	EventsGZ      []byte
+}
+
+// profileSel 是 ProfileWindow/ProfileBaseline 共用的 SELECT 体。
+const profileSel = `SELECT r.passed, r.total, r.wall_ms, r.events_gz
+	FROM results r JOIN matches m ON m.id = r.match_id`
+
+func scanProfileMatches(rows *sql.Rows) ([]ProfileMatch, error) {
+	defer rows.Close()
+	var out []ProfileMatch
+	for rows.Next() {
+		var m ProfileMatch
+		if err := rows.Scan(&m.Passed, &m.Total, &m.WallMS, &m.EventsGZ); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// ProfileWindow 自身窗口：agent 在 task_type 下最近 limit 局已完成对局的
+// 本方结果，按结算时间倒序。仅 done（aborted 孤儿不参与画像）。
+func (s *Store) ProfileWindow(agentID int64, taskType string, limit int) ([]ProfileMatch, error) {
+	rows, err := s.db.Query(profileSel+`
+		WHERE ((m.agent_a = ? AND r.side = 'a') OR (m.agent_b = ? AND r.side = 'b'))
+		  AND m.task_type = ? AND m.status = 'done'
+		ORDER BY m.settled_at DESC, m.id DESC LIMIT ?`,
+		agentID, agentID, taskType, limit)
+	if err != nil {
+		return nil, err
+	}
+	return scanProfileMatches(rows)
+}
+
+// ProfileBaseline 归一化基线：task_type 下全体 agent 最近 limit 局已完成
+// 对局的双侧结果（画像分数 = 自身局在基线分布中的百分位）。
+func (s *Store) ProfileBaseline(taskType string, limit int) ([]ProfileMatch, error) {
+	rows, err := s.db.Query(profileSel+`
+		WHERE m.task_type = ? AND m.status = 'done'
+		ORDER BY m.settled_at DESC, m.id DESC LIMIT ?`,
+		taskType, limit)
+	if err != nil {
+		return nil, err
+	}
+	return scanProfileMatches(rows)
+}
+
+// StoredProfile 是 agent_profiles 的一行（ProfileJSON 由 profile 包解释）。
+type StoredProfile struct {
+	AgentName   string
+	TaskType    string
+	SampleSize  int
+	ProfileJSON string
+	UpdatedAt   int64
+}
+
+// UpsertProfile 覆盖式写入画像（同 agent × task_type 只保留最新）。
+func (s *Store) UpsertProfile(agentID int64, taskType string, sampleSize int, profileJSON string) error {
+	if taskType == "" {
+		taskType = "general"
+	}
+	_, err := s.db.Exec(`INSERT INTO agent_profiles (agent_id, task_type, sample_size, profile_json, updated_at)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(agent_id, task_type) DO UPDATE SET
+		  sample_size = excluded.sample_size,
+		  profile_json = excluded.profile_json,
+		  updated_at = excluded.updated_at`,
+		agentID, taskType, sampleSize, profileJSON, time.Now().Unix())
+	return err
+}
+
+// ProfilesByAgent 按名列举画像（按 task_type 升序）；未知 agent 返回空列表非错误。
+func (s *Store) ProfilesByAgent(name string) ([]StoredProfile, error) {
+	rows, err := s.db.Query(`SELECT a.name, ap.task_type, ap.sample_size, ap.profile_json, ap.updated_at
+		FROM agent_profiles ap JOIN agents a ON a.id = ap.agent_id
+		WHERE a.name = ? ORDER BY ap.task_type`, name)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []StoredProfile
+	for rows.Next() {
+		var p StoredProfile
+		if err := rows.Scan(&p.AgentName, &p.TaskType, &p.SampleSize, &p.ProfileJSON, &p.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
 	}
 	return out, rows.Err()
 }
