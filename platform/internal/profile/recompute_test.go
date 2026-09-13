@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"encoding/json"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"agentbattle/protocol"
@@ -39,8 +40,23 @@ func gzEvents(t *testing.T, events []protocol.Event) []byte {
 	return buf.Bytes()
 }
 
+// sameProfileExceptTime 比较两份画像 JSON 除 UpdatedAt 外是否一致
+//（幂等断言不能依赖重算时刻的墙钟）。
+func sameProfileExceptTime(t *testing.T, a, b string) bool {
+	t.Helper()
+	var pa, pb Profile
+	if err := json.Unmarshal([]byte(a), &pa); err != nil {
+		t.Fatalf("反序列化失败: %v", err)
+	}
+	if err := json.Unmarshal([]byte(b), &pb); err != nil {
+		t.Fatalf("反序列化失败: %v", err)
+	}
+	pa.UpdatedAt, pb.UpdatedAt = 0, 0
+	return reflect.DeepEqual(pa, pb)
+}
+
 // TestRecomputeIdempotentAndIsolated 跑通"读窗口 → 聚合 → 落库"，两次重算
-// 的维度分完全一致（幂等），且 task_type 互不污染。
+// 的维度分完全一致（除 updated_at 外一致），且 task_type 互不污染。
 func TestRecomputeIdempotentAndIsolated(t *testing.T) {
 	s := newStore(t)
 	a, _ := s.CreateAgent("ra")
@@ -82,8 +98,8 @@ func TestRecomputeIdempotentAndIsolated(t *testing.T) {
 		t.Fatal(err)
 	}
 	ps2, _ := s.ProfilesByAgent("ra")
-	if ps2[0].ProfileJSON != first {
-		t.Fatalf("同数据两次重算应幂等（维度分一致）:\n%s\n%s", first, ps2[0].ProfileJSON)
+	if !sameProfileExceptTime(t, first, ps2[0].ProfileJSON) {
+		t.Fatalf("同数据两次重算应幂等（除 updated_at 外一致）:\n%s\n%s", first, ps2[0].ProfileJSON)
 	}
 
 	// general 是独立池：重算后 debug 画像不受影响
@@ -95,7 +111,7 @@ func TestRecomputeIdempotentAndIsolated(t *testing.T) {
 		t.Fatalf("task_type 间应互相隔离: %d", len(ps3))
 	}
 	for _, p := range ps3 {
-		if p.TaskType == "debug" && p.ProfileJSON != first {
+		if p.TaskType == "debug" && !sameProfileExceptTime(t, first, p.ProfileJSON) {
 			t.Fatal("debug 画像不应被 general 重算波及")
 		}
 	}
