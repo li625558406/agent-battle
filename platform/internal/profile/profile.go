@@ -165,7 +165,15 @@ func BuildProfile(agent, taskType string, own, baseline []MatchMetrics, now int6
 	ownWL := collect(own, func(m MatchMetrics) (float64, bool) { return float64(m.WallMS), m.HasEvents })
 	d1, _ = oneDim(ownTK, tkBase, true)
 	d2, _ = oneDim(ownWL, wlBase, true)
-	p.Dims[DimCost] = mergeDim(d1, d2, 0)
+	// Raw = HasEvents 局 tokens 窗口均值（与该维参与口径一致：无事件流的
+	// 局 tokens 恒 0，不参与均值，否则会假性拉低成本）
+	rawTK := 0.0
+	for _, m := range own {
+		if m.HasEvents {
+			rawTK += float64(m.Tokens)
+		}
+	}
+	p.Dims[DimCost] = mergeDim(d1, d2, rawTK/float64(max(1, countEvents(own))))
 
 	// 规划：PreEdit（高好），仅 HasEdit 局
 	peBase := collect(baseline, func(m MatchMetrics) (float64, bool) { return m.PreEdit, m.HasEdit })

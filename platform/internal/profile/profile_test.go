@@ -2,6 +2,7 @@
 package profile
 
 import (
+	"math"
 	"testing"
 )
 
@@ -84,4 +85,63 @@ func TestBuildProfileEdge(t *testing.T) {
 		t.Fatalf("崩溃 agent 稳定性应更低: bad=%v good=%v",
 			pBad.Dims["stability"].Score, pGood.Dims["stability"].Score)
 	}
+}
+
+// saneDims 断言所有已产出的维 Score 在 [0,100] 且非 NaN。
+func saneDims(t *testing.T, p Profile) {
+	t.Helper()
+	for name, d := range p.Dims {
+		if math.IsNaN(d.Score) {
+			t.Fatalf("维 %s Score 为 NaN: %+v", name, d)
+		}
+		if d.Score < 0 || d.Score > 100 {
+			t.Fatalf("维 %s Score 越界 [0,100]: %+v", name, d)
+		}
+	}
+}
+
+// TestBuildProfileAdversarial 三类恶意/极端输入的行为钉住：全崩溃窗口、
+// 空基线、NaN 注入——均不得 panic、不得产出 NaN 或越界分。
+func TestBuildProfileAdversarial(t *testing.T) {
+	// a) 全崩溃窗口：正确性/成本/规划等维全部无有效样本，仅稳定性维参与
+	// （Sample==2），其余维走缺席规则——聚合不得 panic。
+	t.Run("all-crash window", func(t *testing.T) {
+		crash := MatchMetrics{Crash: true}
+		noErr := MatchMetrics{PassRatio: 1, AllPass: true, HasEvents: true, ToolCalls: 2, Tokens: 10, WallMS: 10}
+		own := []MatchMetrics{crash, crash}
+		baseline := []MatchMetrics{crash, noErr, crash, noErr}
+		p := BuildProfile("A", "t", own, baseline, 1)
+		st, ok := p.Dims["stability"]
+		if !ok || st.Sample != 2 {
+			t.Fatalf("稳定性维应存在且 Sample==2: %+v", p.Dims["stability"])
+		}
+		saneDims(t, p)
+	})
+
+	// b) 空基线 + 非空 own：空基线 pct 取中位 50 → 所有有样本维 Score==50
+	// （debugging 除外：全无错误局走满分 100 特判，不属于百分位路径）。
+	t.Run("empty baseline", func(t *testing.T) {
+		ok := MatchMetrics{PassRatio: 1, AllPass: true, HasEvents: true, ToolCalls: 2, Tokens: 10, WallMS: 10}
+		p := BuildProfile("A", "t", []MatchMetrics{ok, ok}, nil, 1)
+		for name, d := range p.Dims {
+			if name == "debugging" {
+				continue
+			}
+			if d.Sample > 0 && d.Score != 50 {
+				t.Fatalf("空基线下维 %s 应取中位 50, got %v", name, d.Score)
+			}
+		}
+		saneDims(t, p)
+	})
+
+	// c) NaN 注入：基线混入 PassRatio=NaN 的局。pct 中 NaN 因 x<v 与 x==v
+	// 同时为假而被静默不计数，等价于该基线值不存在于 less/eq 统计——行为
+	// 钉住为"信任 ExtractMetrics 有界，导出入口对 NaN 基线不崩不越界"。
+	t.Run("nan baseline injection", func(t *testing.T) {
+		ok := MatchMetrics{PassRatio: 1, AllPass: true, HasEvents: true, ToolCalls: 2, Tokens: 10, WallMS: 10}
+		nan := MatchMetrics{PassRatio: math.NaN()}
+		baseline := []MatchMetrics{ok, ok, nan}
+		p := BuildProfile("A", "t", []MatchMetrics{ok, ok}, baseline, 1)
+		saneDims(t, p)
+	})
 }
