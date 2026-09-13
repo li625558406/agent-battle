@@ -16,7 +16,7 @@ type MatchMetrics struct {
 	Recovery  float64 // HasErrors 时的最终通过率（报错后恢复）
 
 	ToolCalls int     // tool_call 事件数
-	ErrRatio  float64 // error 事件数 / max(ToolCalls,1)（无效调用近似）
+	ErrRatio  float64 // error 事件数 / max(ToolCalls,1)（无效调用近似）；值域 [0,+∞) 可大于 1（error 事件可不伴随 tool_call），下游百分位为序数运算不受影响
 
 	HasEdit bool    // 局内含 file_edit 事件（规划维的参与条件）
 	PreEdit float64 // 首个 file_edit 前的 tool_call 数 / max(ToolCalls,1)
@@ -32,8 +32,17 @@ type MatchMetrics struct {
 func ExtractMetrics(events []protocol.Event, passed, total int, wallMS int64) MatchMetrics {
 	m := MatchMetrics{WallMS: wallMS, Crash: total == 0, HasEvents: len(events) > 0}
 	if total > 0 {
-		m.PassRatio = float64(passed) / float64(total)
-		m.AllPass = passed == total
+		// 异常/恶意 runner 可能上报 passed<0 或 passed>total，钳制到 [0,total]
+		// 保证 PassRatio（及复用它的 Recovery）恒在 [0,1]。
+		p := passed
+		if p < 0 {
+			p = 0
+		}
+		if p > total {
+			p = total
+		}
+		m.PassRatio = float64(p) / float64(total)
+		m.AllPass = p == total
 	}
 	toolCalls, errEvents := 0, 0
 	for _, e := range events {

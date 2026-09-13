@@ -76,3 +76,34 @@ func TestExtractMetricsDegenerate(t *testing.T) {
 		t.Fatalf("tokens 应累加: %d", m.Tokens)
 	}
 }
+
+// TestExtractMetricsAdversarial 对抗性：崩溃局中途留事件、多条 edit 只取首个、
+// 畸形 passed（>total / 负数）钳制到 [0,total]。
+func TestExtractMetricsAdversarial(t *testing.T) {
+	// a) crash + 非空事件流：崩溃局中途留下事件的真是场景
+	m := ExtractMetrics([]protocol.Event{ev(protocol.EventToolCall, 50), ev(protocol.EventError, 0)},
+		0, 0, 100)
+	if !m.Crash || !m.HasEvents || m.ToolCalls != 1 || !m.HasErrors || m.Tokens != 50 || m.AllPass {
+		t.Fatalf("crash+事件流组合错误: %+v", m)
+	}
+	// b) 多条 file_edit 只取首个：首 edit 前 1 次 tool_call / 总 2 次
+	m = ExtractMetrics([]protocol.Event{
+		ev(protocol.EventToolCall, 0),
+		ev(protocol.EventFileEdit, 0),
+		ev(protocol.EventFileEdit, 0),
+		ev(protocol.EventToolCall, 0),
+	}, 1, 1, 10)
+	if !m.HasEdit || m.PreEdit != 0.5 {
+		t.Fatalf("应只取首个 edit 且 PreEdit=0.5: %+v", m)
+	}
+	// c) passed > total：钳制到 total，PassRatio=1.0 且 AllPass
+	m = ExtractMetrics(nil, 5, 3, 10)
+	if m.PassRatio != 1.0 || !m.AllPass {
+		t.Fatalf("passed>total 应钳制为 1.0/AllPass: %+v", m)
+	}
+	// d) passed 为负：钳制到 0，PassRatio=0
+	m = ExtractMetrics(nil, -2, 4, 10)
+	if m.PassRatio != 0 {
+		t.Fatalf("passed<0 应钳制为 0: %+v", m)
+	}
+}
