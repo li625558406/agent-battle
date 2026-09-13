@@ -130,7 +130,7 @@ func TestPlatformLoopEcho(t *testing.T) {
 		t.Fatalf("本地汇总行胜负平不符（runner 侧 winner 应判 a 胜）:\n%s", rep)
 	}
 
-	// 结算行：A 修复（2/2）、B 不修复（0/2）→ winner=a 确定性；
+	// 结算行：A 修复（2/2）、B 不修复（1/2）→ winner=a 确定性；
 	// 定级赛 K=40 → A 1220 / B 1180
 	settleRe := regexp.MustCompile(`第 1 轮 结算 winner=(\S+) A分=(\d+) B分=(\d+)`)
 	m := settleRe.FindStringSubmatch(rep)

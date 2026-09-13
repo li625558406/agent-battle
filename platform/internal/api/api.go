@@ -205,9 +205,13 @@ func (s *Server) handleResult(w http.ResponseWriter, r *http.Request, ag store.A
 		DiffHash: body.DiffHash, EventsGZ: eventsGZ,
 	})
 	if err != nil {
-		// 同侧重复提交被 results 主键拒绝 → 409；其余写库失败 → 500，不回显内部错误
+		// 同侧重复提交被 results 主键拒绝 → 409；上方 pending 检查与
+		// AddResult 守卫之间存在 TOCTOU 窗口（并发结算/清扫抢先终结对局），
+		// 守卫错误含"已结束"时同样按 409 语义返回；其余写库失败 → 500
 		if strings.Contains(err.Error(), "UNIQUE") {
 			writeErr(w, http.StatusConflict, "该侧结果已上报过")
+		} else if strings.Contains(err.Error(), "已结束") {
+			writeErr(w, http.StatusConflict, "对局已结束，拒绝上报")
 		} else {
 			log.Printf("对局 %d 结果写入失败: %v", matchID, err)
 			writeErr(w, http.StatusInternalServerError, "结果写入失败")

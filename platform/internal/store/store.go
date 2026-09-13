@@ -302,9 +302,10 @@ func (s *Store) settle(matchID int64) error {
 	return tx.Commit()
 }
 
-// SweepStaleMatches 孤儿对局清理：把 pending 且 created_at 早于
-// now-olderThan 的对局置为 aborted（mirror 中止会在平台侧遗留永远 waiting
-// 的半场对局）。aborted 不参与 Elo、拒绝后续上报（AddResult 守卫）。
+// SweepStaleMatches 孤儿对局清理：把 pending 且 created_at 早于或等于
+// now-olderThan（SQL 用 <=）的对局置为 aborted（mirror 中止会在平台侧
+// 遗留永远 waiting 的半场对局）。aborted 不参与 Elo、拒绝后续上报
+//（AddResult 守卫）。
 // 返回被清理的对局数。olderThan 为负时 cutoff 在未来，全部 pending 命中
 //（测试便利，语义即"清扫一切未结算"）。
 func (s *Store) SweepStaleMatches(olderThan time.Duration) (int64, error) {
