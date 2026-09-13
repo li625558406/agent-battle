@@ -59,7 +59,7 @@ func printReview(w io.Writer, rep client.ReviewReport) {
 	winner := "平局"
 	if rep.Winner == "a" || rep.Winner == "b" {
 		if s, ok := rep.Sides[rep.Winner]; ok {
-			winner = s.Agent
+			winner = sanitize(s.Agent)
 		}
 	}
 	fmt.Fprintf(w, "对局 %d · %s（%s）· 胜者 %s\n",
@@ -74,7 +74,7 @@ func printReview(w io.Writer, rep client.ReviewReport) {
 			ev = "有"
 		}
 		fmt.Fprintf(w, "  %s %s: %d/%d wall %dms 事件流 %s\n",
-			strings.ToUpper(side), s.Agent, s.Passed, s.Total, s.WallMS, ev)
+			strings.ToUpper(side), sanitize(s.Agent), s.Passed, s.Total, s.WallMS, ev)
 	}
 
 	hasEvents := func(side string) bool {
@@ -108,7 +108,7 @@ func printReview(w io.Writer, rep client.ReviewReport) {
 		}
 		agent := side
 		if s, ok := rep.Sides[side]; ok {
-			agent = s.Agent
+			agent = sanitize(s.Agent)
 		}
 		fmt.Fprintf(w, "时间线 %s（★=首次报错）:\n", agent)
 		if len(evs) == 0 {

@@ -92,6 +92,21 @@ func TestPrintReview(t *testing.T) {
 	if !strings.Contains(zero, "胜者 平局") {
 		t.Fatalf("零值报告胜者应为 平局:\n%s", zero)
 	}
+
+	// 对抗性：agent 名含 ANSI ESC，三处出口（胜者行/概要行/时间线标题）均须剥控制字符
+	evil := sampleReview()
+	sa := evil.Sides["a"]
+	sa.Agent = "evil\x1b[31mA"
+	evil.Sides["a"] = sa
+	buf.Reset()
+	printReview(&buf, evil)
+	eout := buf.String()
+	if strings.ContainsRune(eout, '\x1b') {
+		t.Fatalf("agent 名中的 ESC 转义应被剥除:\n%s", eout)
+	}
+	if !strings.Contains(eout, "evil") {
+		t.Fatalf("净化后应保留剩余文本 evil:\n%s", eout)
+	}
 }
 
 // TestCmdReviewNegative 必填校验与 404/409 错误透传。

@@ -8,7 +8,7 @@
 - 新包 platform/internal/review：纯函数 BuildReport（profile.DecodeEvents 导出复用 + store.ReviewData → 复盘结构），无 IO 依赖、单测确定性覆盖（first_error 标注等真实对局不确定的分支在此层覆盖）
 - store.ReviewData：matches/results JOIN 一次取齐对局元信息 + 双侧判分结果 + 双侧事件流（压缩），自我对局显式报错
 - api：公开路由 GET /api/matches/{id}/review 四分支——400（非法 id）/404（对局不存在）/409（未结算/pending）/200（报告 JSON）
-- 公开面加固：时间线最多渲染 2000 条（超出截断标注）、Tool/Type 钳制白名单（事件流字段不可信）、wall_ms 负值守卫、渲染层控制字符净化（防终端注入）
+- 公开面加固：时间线每侧最多展示 2000 条（超出静默截断，对比指标与首次报错标注仍按全量事件计算）、Tool/Type 钳制白名单（事件流字段不可信）、wall_ms 负值守卫、渲染层控制字符净化（防终端注入）
 - runner 侧：client.Review + CLI `review --server URL --match N` 子命令（结论行 + 对比表含"通过率"行 + 双侧"时间线"），404 等错误非零退出并透传状态码
 - E2E TestReviewReport（`runner/e2e/platform_e2e_test.go`）：独立起服镜像 1 局（--fix-a 判 a 胜，与 TestPlatformLoopEcho 同一确定性来源）→ review 按 matchID 1 查得结论行/胜者/对比表/时间线；负路径断言不存在对局报 404
 
