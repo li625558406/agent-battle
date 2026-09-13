@@ -109,7 +109,7 @@ func git(dir string, args ...string) error {
 	cmd := exec.CommandContext(ctx, "git", full...)
 	cmd.Dir = dir
 	for _, e := range os.Environ() {
-		if k, _, ok := strings.Cut(e, "="); ok && (k == "GIT_DIR" || k == "GIT_WORK_TREE") {
+		if k, _, ok := strings.Cut(e, "="); ok && (strings.EqualFold(k, "GIT_DIR") || strings.EqualFold(k, "GIT_WORK_TREE")) {
 			continue
 		}
 		cmd.Env = append(cmd.Env, e)

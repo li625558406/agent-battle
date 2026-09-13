@@ -80,6 +80,23 @@ func TestCreateCopiesNestedSeed(t *testing.T) {
 	}
 }
 
+// 对抗测试：Windows 上 git.exe 读环境变量大小写不敏感，
+// 小写 git_dir/GIT_work_tree 会击穿大小写敏感过滤，把 git init 建到敌意目录。
+func TestCreateSurvivesLowercaseGitEnv(t *testing.T) {
+	t.Setenv("git_dir", filepath.Join(t.TempDir(), "hijack.git"))
+	seed := t.TempDir()
+	write(t, seed, "a.txt", "hi")
+
+	sb, cleanup, err := Create(seed)
+	defer cleanup()
+	if err != nil {
+		t.Fatalf("Create failed with lowercase hostile env: %v", err)
+	}
+	if fi, err := os.Stat(filepath.Join(sb, ".git")); err != nil || !fi.IsDir() {
+		t.Fatalf("sandbox .git missing (env hijack not filtered): stat err: %v", err)
+	}
+}
+
 // C2：并发调用 cleanup 不得有数据竞争（-race 验证），且目录只删一次。
 func TestCleanupConcurrent(t *testing.T) {
 	seed := t.TempDir()
