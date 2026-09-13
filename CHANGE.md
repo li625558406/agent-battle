@@ -1,5 +1,22 @@
 # CHANGE.md — 项目迭代记录
 
+## 2026-09-13 · M1 计划 3 完成：平台加固收尾 + E2E 确定性升级
+
+**主题**：并发写锁、结算竞态、孤儿对局三类平台风险清除；CLI 分侧配置使 E2E 从三分支断言收敛为确定性断言
+
+**核心变更**：
+- store DSN 追加 `_pragma=busy_timeout(5000)`：并发写锁竞争退避等待而非立即 SQLITE_BUSY（database/sql 连接池天然多连接，上报/结算并发路径可竞争）
+- settle 原子幂等：事务内以条件更新抢占结算权（`UPDATE matches SET status='done' WHERE id=? AND status='pending'`，RowsAffected==0 即 no-op），全部读取移入同一事务——并发上报双侧时恰好结算一次，Elo/统计不双计（并发 AddResult 测试 10 场 × 2 goroutine 验证）
+- 孤儿对局清理：`SweepStaleMatches(olderThan)` 把超时 pending 置为 aborted（不参与 Elo）；AddResult 与 API 层双重守卫拒绝对非 pending 对局上报（409 固定文案）；server `--match-timeout`（默认 30m）周期清扫，mirror 中止遗留的永远 waiting 半场对局得以收敛
+- CLI mirror 新增 `--fix-a/--fix-b`：分侧 echo 解法注入（仅 --agent echo），与空配置侧形成确定性判分差
+- E2E 升级：`--fix-a` 注入后 winner=a 恒定，胜方无关三分支断言（1220/1180/双 1200）收敛为精确断言；本地汇总行胜负平断言补齐（runner 侧 session.winner 与平台侧 winnerOf 漂移防线闭环）
+- 收官顺路修正：TOCTOU 窗口（pending 检查与 AddResult 守卫之间被并发结算/清扫抢先）命中时 API 返回 409 而非误映射 500
+- judge_key 按局随机明确移出 backlog（与任务包预签名机制冲突，VerifyDir 要求与 manifest 签名相同的 key；属 M2 防作弊改造范畴，见计划文档 Out of scope）
+
+**遗留事项**：
+- sentinel 类型化判别（扩展第三方 adapter 前置）、bundle 路由鉴权、judge GIT_INDEX_FILE 过滤维持 backlog
+- judge `TestRunCommandTimeout` 全量并发下偶发计时抖动（存量，独立复跑稳定）
+
 ## 2026-09-13 · M1 计划 2 完成：平台最小功能 + Runner 联网对接，真实 claude 联网对战验证通过
 
 **主题**：平台侧（注册/任务下发/结果上报/Elo 结算/基础天梯）+ Runner 联网对接全链路联通，M1 计划 2（9 任务）完成
