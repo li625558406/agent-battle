@@ -59,8 +59,14 @@ func sameProfileExceptTime(t *testing.T, a, b string) bool {
 // 的维度分完全一致（除 updated_at 外一致），且 task_type 互不污染。
 func TestRecomputeIdempotentAndIsolated(t *testing.T) {
 	s := newStore(t)
-	a, _ := s.CreateAgent("ra")
-	b, _ := s.CreateAgent("rb")
+	a, err := s.CreateAgent("ra")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := s.CreateAgent("rb")
+	if err != nil {
+		t.Fatal(err)
+	}
 	events := []protocol.Event{{Type: protocol.EventToolCall, Tokens: 10}, {Type: protocol.EventFileEdit}}
 
 	mk := func(taskType string, passed int) int64 {
@@ -97,7 +103,10 @@ func TestRecomputeIdempotentAndIsolated(t *testing.T) {
 	if err := Recompute(s, a.ID, "debug"); err != nil {
 		t.Fatal(err)
 	}
-	ps2, _ := s.ProfilesByAgent("ra")
+	ps2, err := s.ProfilesByAgent("ra")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !sameProfileExceptTime(t, first, ps2[0].ProfileJSON) {
 		t.Fatalf("同数据两次重算应幂等（除 updated_at 外一致）:\n%s\n%s", first, ps2[0].ProfileJSON)
 	}
@@ -106,7 +115,10 @@ func TestRecomputeIdempotentAndIsolated(t *testing.T) {
 	if err := Recompute(s, a.ID, "general"); err != nil {
 		t.Fatal(err)
 	}
-	ps3, _ := s.ProfilesByAgent("ra")
+	ps3, err := s.ProfilesByAgent("ra")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(ps3) != 2 {
 		t.Fatalf("task_type 间应互相隔离: %d", len(ps3))
 	}
@@ -150,16 +162,40 @@ func TestDecodeEventsDegenerate(t *testing.T) {
 	if got := decodeEvents(good[:len(good)/2]); got != nil {
 		t.Fatalf("中段截断应整流返回 nil，不应带残缺数据: %+v", got)
 	}
+
+	// d) 尾部损坏（合法 gz 砍掉尾部几字节）：gzip 校验失败必须整流降级返回 nil
+	if got := decodeEvents(good[:len(good)-4]); got != nil {
+		t.Fatalf("尾部损坏应整流返回 nil: %+v", got)
+	}
+
+	// e) 合法 gzip 流内含畸形 JSON 行：必须整流降级返回 nil
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	if _, err := gw.Write([]byte("not json\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := decodeEvents(buf.Bytes()); got != nil {
+		t.Fatalf("流内畸形 JSON 应整流返回 nil: %+v", got)
+	}
 }
 
 // TestRecomputeNoMatches 无任何对局时不落画像（空窗口不产生垃圾行）。
 func TestRecomputeNoMatches(t *testing.T) {
 	s := newStore(t)
-	a, _ := s.CreateAgent("empty")
+	a, err := s.CreateAgent("empty")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := Recompute(s, a.ID, "general"); err != nil {
 		t.Fatalf("空窗口重算不应报错: %v", err)
 	}
-	ps, _ := s.ProfilesByAgent("empty")
+	ps, err := s.ProfilesByAgent("empty")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(ps) != 0 {
 		t.Fatalf("空窗口不应落库: %d", len(ps))
 	}
