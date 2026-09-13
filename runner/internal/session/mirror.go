@@ -5,6 +5,7 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -81,7 +82,8 @@ func Mirror(ctx context.Context, cfg MirrorConfig) (Summary, error) {
 
 	for r := 1; r <= cfg.Rounds; r++ {
 		if err := ctx.Err(); err != nil {
-			return sum, fmt.Errorf("镜像对战被取消(已完成 %d 局): %w", sum.RoundsPlayed(), err)
+			return abort(sum, cfg.OutDir,
+				fmt.Errorf("镜像对战被取消(已完成 %d 局): %w", sum.RoundsPlayed(), err))
 		}
 		label := fmt.Sprintf("A-r%d", r)
 		resA, errA := Run(ctx, Config{Adapter: cfg.MakeA(), TaskDir: cfg.TaskDir,
@@ -89,6 +91,25 @@ func Mirror(ctx context.Context, cfg MirrorConfig) (Summary, error) {
 		label = fmt.Sprintf("B-r%d", r)
 		resB, errB := Run(ctx, Config{Adapter: cfg.MakeB(), TaskDir: cfg.TaskDir,
 			Label: label, Env: cfg.EnvB, JudgeKey: cfg.JudgeKey, OutDir: cfg.OutDir})
+
+		// ctx 取消/超时导致的错误是"对局被中止"，不是 agent 技术性失败：
+		// 不计入崩溃统计；当局未完整判分，不产生明细；已完成的局数据
+		// 以部分汇总形式落盘后原样返回 ctx 错误。
+		// 注意区分：session.Run 的单局自身超时返回的 "agent 执行超时" 不包装
+		// context.DeadlineExceeded，仍走下方 switch 计为对应侧错误。
+		if ctx.Err() != nil || errors.Is(errA, context.Canceled) || errors.Is(errA, context.DeadlineExceeded) ||
+			errors.Is(errB, context.Canceled) || errors.Is(errB, context.DeadlineExceeded) {
+			cause := ctx.Err()
+			if cause == nil {
+				// 理论不可达（Run 仅在 ctx.Err() 非 nil 时包装 ctx 错误），
+				// 兜底取 Run 的错误，避免静默返回 nil
+				cause = errA
+				if cause == nil {
+					cause = errB
+				}
+			}
+			return abort(sum, cfg.OutDir, cause)
+		}
 
 		d := RoundDetail{Round: r, DirA: resA.Dir, DirB: resB.Dir}
 		switch {
@@ -127,6 +148,15 @@ func Mirror(ctx context.Context, cfg MirrorConfig) (Summary, error) {
 		return sum, fmt.Errorf("写入汇总失败: %w", err)
 	}
 	return sum, nil
+}
+
+// abort 对局被中止时的收尾：落盘含已完成局的部分汇总后返回携带原因的错误；
+// 落盘失败不掩盖中止原因，用 errors.Join 一并上报。
+func abort(sum Summary, outDir string, cause error) (Summary, error) {
+	if perr := persistSummary(sum, outDir); perr != nil {
+		return sum, errors.Join(cause, perr)
+	}
+	return sum, cause
 }
 
 // winner 决出单局胜者：

@@ -2,10 +2,13 @@ package session
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"agentbattle/runner/internal/adapter"
 )
@@ -114,5 +117,76 @@ func TestMirrorSummaryShape(t *testing.T) {
 	s := Summary{WinsA: 1, WinsB: 2, Ties: 3}
 	if s.RoundsPlayed() != 6 {
 		t.Fatalf("RoundsPlayed 应为 6, got %d", s.RoundsPlayed())
+	}
+}
+
+// slowCancelAdapter 持续产事件直到 ctx 取消——复刻"取消打断局中"场景。
+type slowCancelAdapter struct{}
+
+func (slowCancelAdapter) Name() string  { return "slow-cancel" }
+func (slowCancelAdapter) Detect() error { return nil }
+
+func (slowCancelAdapter) Launch(ctx context.Context, cwd, taskDescription string, env []string, out chan<- adapter.RawEvent) error {
+	for i := 0; ; i++ {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case out <- adapter.RawEvent{Type: "tool_call", Note: fmt.Sprintf("step-%d", i)}:
+		}
+	}
+}
+
+// TestMirrorCancelMidRound 验证 ctx 取消发生在局中时：不被记为 agent 崩溃，
+// 已完成局的部分汇总仍落盘，Mirror 原样返回 ctx 错误。
+func TestMirrorCancelMidRound(t *testing.T) {
+	taskDir := newTask(t)
+	outDir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cfg := MirrorConfig{
+		TaskDir: taskDir, JudgeKey: []byte(DevJudgeKey), Rounds: 5, OutDir: outDir,
+		MakeA: func() adapter.Adapter { return slowCancelAdapter{} },
+		MakeB: func() adapter.Adapter { return slowCancelAdapter{} },
+	}
+	go func() { time.Sleep(300 * time.Millisecond); cancel() }()
+	sum, err := Mirror(ctx, cfg)
+	if err == nil {
+		t.Fatal("cancelled mirror must return ctx error")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("want context.Canceled, got %v", err)
+	}
+	if sum.AErrors != 0 || sum.BErrors != 0 {
+		t.Fatalf("ctx cancel must not count as agent error: %+v", sum)
+	}
+	// 部分汇总必须已落盘
+	files, _ := filepath.Glob(filepath.Join(outDir, "mirror-*.json"))
+	if len(files) == 0 {
+		t.Fatal("partial summary not persisted on cancel")
+	}
+}
+
+// TestMirrorDeadlineMidRound 对抗性用例：父 ctx 超时（而非显式取消）同样
+// 不得计为 agent 崩溃，且返回的错误链可被 errors.Is 识别为 DeadlineExceeded。
+func TestMirrorDeadlineMidRound(t *testing.T) {
+	taskDir := newTask(t)
+	outDir := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	cfg := MirrorConfig{
+		TaskDir: taskDir, JudgeKey: []byte(DevJudgeKey), Rounds: 5, OutDir: outDir,
+		MakeA: func() adapter.Adapter { return slowCancelAdapter{} },
+		MakeB: func() adapter.Adapter { return slowCancelAdapter{} },
+	}
+	sum, err := Mirror(ctx, cfg)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("want context.DeadlineExceeded, got %v", err)
+	}
+	if sum.AErrors != 0 || sum.BErrors != 0 {
+		t.Fatalf("ctx deadline must not count as agent error: %+v", sum)
+	}
+	files, _ := filepath.Glob(filepath.Join(outDir, "mirror-*.json"))
+	if len(files) == 0 {
+		t.Fatal("partial summary not persisted on deadline")
 	}
 }
