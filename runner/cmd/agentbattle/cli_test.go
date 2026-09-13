@@ -277,6 +277,19 @@ func TestReportRoundUploadFailureAborts(t *testing.T) {
 	}
 }
 
+// TestMirrorFixFlagsRequireEcho 分侧解法注入仅对 echo 有意义：
+// 与 claude-code 组合必须在开赛前拦截（配置分化走 --env-a/b）。
+func TestMirrorFixFlagsRequireEcho(t *testing.T) {
+	err := cmdMirror([]string{"--task", t.TempDir(), "--agent", "claude-code", "--fix-a", "x"})
+	if err == nil || !strings.Contains(err.Error(), "--fix-a/--fix-b 仅支持") {
+		t.Fatalf("应拒绝 --fix-a 与 claude-code 组合: %v", err)
+	}
+	err = cmdMirror([]string{"--task", t.TempDir(), "--agent", "claude-code", "--fix-b", "x"})
+	if err == nil || !strings.Contains(err.Error(), "--fix-a/--fix-b 仅支持") {
+		t.Fatalf("应拒绝 --fix-b 与 claude-code 组合: %v", err)
+	}
+}
+
 // TestReportRoundCreateFailureAborts：CreateMatch 失败同样中止。
 func TestReportRoundCreateFailureAborts(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

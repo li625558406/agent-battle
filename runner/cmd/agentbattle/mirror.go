@@ -29,6 +29,8 @@ func cmdMirror(args []string) error {
 	tokA := fs.String("token-a", "", "A 侧 token（--server 模式必填）")
 	nameB := fs.String("name-b", "", "B 侧平台注册名（--server 模式必填）")
 	tokB := fs.String("token-b", "", "B 侧 token（--server 模式必填）")
+	fixA := fs.String("fix-a", "", "A 侧 echo 解法内容（--agent echo 专用，制造确定性判分差）")
+	fixB := fs.String("fix-b", "", "B 侧 echo 解法内容（--agent echo 专用）")
 	var envA, envB envFlag
 	fs.Var(&envA, "env-a", "A 侧环境变量 K=V，可多次")
 	fs.Var(&envB, "env-b", "B 侧环境变量 K=V，可多次")
@@ -40,6 +42,10 @@ func cmdMirror(args []string) error {
 	}
 	if *rounds <= 0 {
 		return fmt.Errorf("--rounds 必须 > 0: %d", *rounds)
+	}
+	// 分侧解法注入仅对 echo 有意义（claude-code 的配置分化走 --env-a/b）
+	if (*fixA != "" || *fixB != "") && *agent != "echo" {
+		return fmt.Errorf("--fix-a/--fix-b 仅支持 --agent echo")
 	}
 	// 联网上报模式参数校验：缺一即拦在开赛前，避免跑到一半才发现没法上报
 	var cl *client.Client
@@ -68,6 +74,13 @@ func cmdMirror(args []string) error {
 		}
 		return a
 	}
+	// 分侧构造：fix 非空时该侧注入解法（确定性满分），否则维持统一 mk
+	side := func(fix string) func() adapter.Adapter {
+		if fix == "" {
+			return mk
+		}
+		return func() adapter.Adapter { return adapter.Echo{FixContent: fix} }
+	}
 	cfg := session.MirrorConfig{
 		TaskDir:  *task,
 		JudgeKey: sessionDevKey(),
@@ -75,8 +88,8 @@ func cmdMirror(args []string) error {
 		OutDir:   outDir,
 		EnvA:     []string(envA),
 		EnvB:     []string(envB),
-		MakeA:    mk,
-		MakeB:    mk,
+		MakeA:    side(*fixA),
+		MakeB:    side(*fixB),
 	}
 	if cl != nil {
 		cfg.Report = func(_ context.Context, r int, resA, resB session.Result, errA, errB error) error {
