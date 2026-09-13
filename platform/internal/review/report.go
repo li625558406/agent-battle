@@ -120,6 +120,9 @@ func buildSide(in SideInput) (SideMeta, []TlEvent, []Mark, sideStats) {
 		te := TlEvent{Seq: e.Seq, TS: e.TS, Type: e.Type, Tool: e.Tool}
 		if e.Type == protocol.EventFileEdit {
 			te.Path = e.Note
+			if len(te.Path) > 1024 { // 公开展示面：钳制超长 Note，防自洩放大
+				te.Path = te.Path[:1024]
+			}
 			st.edits++
 		}
 		if e.Tokens > 0 {

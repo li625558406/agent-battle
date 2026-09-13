@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"encoding/json"
 	"math"
+	"strings"
 	"testing"
 
 	"agentbattle/protocol"
@@ -178,5 +179,24 @@ func TestBuildReportAdversarial(t *testing.T) {
 	}
 	if mk := rep.Marks["a"]; len(mk) != 1 || mk[0].Seq != 5 {
 		t.Fatalf("乱序流中首个 error 的 seq 应为 5: %+v", mk)
+	}
+	// 负 DurationMS 不透传（与 Tokens 守卫同口径）
+	rep = BuildReport(meta,
+		SideInput{Agent: "a", Passed: 1, Total: 1,
+			EventsGZ: gz(t,
+				protocol.Event{Seq: 1, Type: protocol.EventToolCall, Tool: "bash", DurationMS: -99},
+				protocol.Event{Seq: 2, Type: protocol.EventToolCall, Tool: "bash", DurationMS: 7})},
+		SideInput{Agent: "b", Passed: 1, Total: 1})
+	if ta := rep.Timeline["a"]; len(ta) != 2 || ta[0].DurationMS != 0 || ta[1].DurationMS != 7 {
+		t.Fatalf("负 DurationMS 应丢弃、正值保留: %+v", ta)
+	}
+	// 超长 Note 钳制到 1024
+	long := strings.Repeat("x", 2000)
+	rep = BuildReport(meta,
+		SideInput{Agent: "a", Passed: 1, Total: 1,
+			EventsGZ: gz(t, protocol.Event{Seq: 1, Type: protocol.EventFileEdit, Note: long})},
+		SideInput{Agent: "b", Passed: 1, Total: 1})
+	if ta := rep.Timeline["a"]; len(ta) != 1 || len(ta[0].Path) != 1024 {
+		t.Fatalf("超长 Note 应钳制到 1024: got %d", len(rep.Timeline["a"][0].Path))
 	}
 }
