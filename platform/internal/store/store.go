@@ -182,12 +182,35 @@ func (s *Store) AddResult(matchID int64, side string, r Result) (bool, error) {
 	return true, s.settle(matchID)
 }
 
-// settle 复算胜负并落 Elo 与统计。注意：winner 逻辑在 runner 侧
-//（agentbattle/runner/internal/session/mirror.go 的 winner 函数，跨 internal
-// 边界不可导入）与本包 winnerOf 各有一份，规则变更必须双侧同步。
+// settle 结算一场对局：事务内先以条件更新抢占结算权（仅 status='pending'
+// 的对局能被置为 done），抢到的事务完成 Elo 与统计落库；没抢到（并发结算
+// 竞态中对方已结算、或对局不存在/已结束）回滚为 no-op。幂等由单条 UPDATE
+// 的原子性保证：双侧几乎同时到齐时恰好结算一次，Elo/统计不双计。
+// 注意：winner 逻辑在 runner 侧（agentbattle/runner/internal/session/mirror.go
+// 的 winner 函数，跨 internal 边界不可导入）与本包 winnerOf 各有一份，
+// 规则变更必须双侧同步。
 func (s *Store) settle(matchID int64) error {
-	// 1. 读双侧结果
-	rows, err := s.db.Query(`SELECT side, passed, total, wall_ms FROM results WHERE match_id = ?`, matchID)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// 1. 原子抢占结算权：RowsAffected==0 即已被并发结算或对局不存在
+	res, err := tx.Exec(
+		`UPDATE matches SET status = 'done', settled_at = ? WHERE id = ? AND status = 'pending'`,
+		time.Now().Unix(), matchID)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return err
+	} else if n == 0 {
+		return nil
+	}
+
+	// 2. 事务内读双侧结果
+	rows, err := tx.Query(`SELECT side, passed, total, wall_ms FROM results WHERE match_id = ?`, matchID)
 	if err != nil {
 		return err
 	}
@@ -208,25 +231,22 @@ func (s *Store) settle(matchID int64) error {
 		}
 	}
 	if err := rows.Err(); err != nil {
+		rows.Close()
 		return err
 	}
 	rows.Close()
 
-	// 2. 读 match 拿双方 agent id；已结算则跳过（幂等防御）
-	_, ida, idb, status, _, err := s.MatchByID(matchID)
-	if err != nil {
+	// 3. 事务内读双方 agent id 与当前数据
+	var ida, idb int64
+	if err := tx.QueryRow(`SELECT agent_a, agent_b FROM matches WHERE id = ?`, matchID).
+		Scan(&ida, &idb); err != nil {
 		return fmt.Errorf("读对局 %d: %w", matchID, err)
 	}
-	if status == "done" {
-		return nil
-	}
-
-	// 3. 读双方 Agent
-	agA, err := s.AgentByID(ida)
+	agA, err := scanAgent(tx.QueryRow(`SELECT `+agentCols+` FROM agents WHERE id = ?`, ida))
 	if err != nil {
 		return fmt.Errorf("读 agent %d: %w", ida, err)
 	}
-	agB, err := s.AgentByID(idb)
+	agB, err := scanAgent(tx.QueryRow(`SELECT `+agentCols+` FROM agents WHERE id = ?`, idb))
 	if err != nil {
 		return fmt.Errorf("读 agent %d: %w", idb, err)
 	}
@@ -244,7 +264,7 @@ func (s *Store) settle(matchID int64) error {
 	}
 	na, nb := elo.Update(agA.Rating, agB.Rating, scoreA, agA.Games, agB.Games)
 
-	// 5. 在 Go 侧算好双方新的统计四列，再进入事务直接 UPDATE
+	// 5. 双方新统计四列
 	aGames, aWins, aLosses, aTies := agA.Games+1, agA.Wins, agA.Losses, agA.Ties
 	bGames, bWins, bLosses, bTies := agB.Games+1, agB.Wins, agB.Losses, agB.Ties
 	switch w {
@@ -259,12 +279,11 @@ func (s *Store) settle(matchID int64) error {
 		bTies++
 	}
 
-	// 6. 事务内落库：双方 agent 统计 + match 状态
-	tx, err := s.db.Begin()
-	if err != nil {
+	// 6. 同一事务内落库（结算权已抢占，winner 可安全补写；
+	// GET /matches/{id} 经 MatchByID 回读该列）
+	if _, err := tx.Exec(`UPDATE matches SET winner = ? WHERE id = ?`, w, matchID); err != nil {
 		return err
 	}
-	defer tx.Rollback()
 	if _, err := tx.Exec(
 		`UPDATE agents SET rating = ?, games = ?, wins = ?, losses = ?, ties = ? WHERE id = ?`,
 		na, aGames, aWins, aLosses, aTies, ida); err != nil {
@@ -273,11 +292,6 @@ func (s *Store) settle(matchID int64) error {
 	if _, err := tx.Exec(
 		`UPDATE agents SET rating = ?, games = ?, wins = ?, losses = ?, ties = ? WHERE id = ?`,
 		nb, bGames, bWins, bLosses, bTies, idb); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(
-		`UPDATE matches SET status = 'done', winner = ?, settled_at = ? WHERE id = ?`,
-		w, time.Now().Unix(), matchID); err != nil {
 		return err
 	}
 	return tx.Commit()

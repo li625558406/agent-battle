@@ -2,6 +2,7 @@ package store
 
 import (
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -160,5 +161,110 @@ func TestAddResultForeignKeys(t *testing.T) {
 	s := openTest(t)
 	if _, err := s.AddResult(99999, "a", Result{Total: 1}); err == nil {
 		t.Fatal("nonexistent matchID must fail (foreign_keys=ON)")
+	}
+}
+
+// TestSettleIdempotent 验证重复 settle 是 no-op：统计与评分不得二次变动。
+func TestSettleIdempotent(t *testing.T) {
+	s := openTest(t)
+	a, _ := s.CreateAgent("A")
+	b, _ := s.CreateAgent("B")
+	mid, _ := s.CreateMatch("fix-add", a.ID, b.ID)
+	if _, err := s.AddResult(mid, "a", Result{Passed: 2, Total: 2, WallMS: 100}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddResult(mid, "b", Result{Passed: 1, Total: 2, WallMS: 50}); err != nil {
+		t.Fatal(err)
+	}
+	ga, _ := s.AgentByID(a.ID)
+	if err := s.settle(mid); err != nil {
+		t.Fatal(err)
+	}
+	ga2, _ := s.AgentByID(a.ID)
+	if ga2.Games != 1 || ga2.Rating != ga.Rating {
+		t.Fatalf("重复结算改动了统计: before games=%d rating=%v, after games=%d rating=%v",
+			ga.Games, ga.Rating, ga2.Games, ga2.Rating)
+	}
+}
+
+// TestSettleConcurrentReports 对抗性：双侧几乎同时上报（两个 goroutine 都
+// 可能看到 count==2 并调 settle），每场必须恰好结算一次（games 精确 = 场数）。
+func TestSettleConcurrentReports(t *testing.T) {
+	s := openTest(t)
+	a, _ := s.CreateAgent("A")
+	b, _ := s.CreateAgent("B")
+	for i := 0; i < 10; i++ {
+		mid, err := s.CreateMatch("fix-add", a.ID, b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		errs := make([]error, 2)
+		wg.Add(2)
+		go func() { defer wg.Done(); <-start; _, errs[0] = s.AddResult(mid, "a", Result{Passed: 2, Total: 2, WallMS: 100}) }()
+		go func() { defer wg.Done(); <-start; _, errs[1] = s.AddResult(mid, "b", Result{Passed: 1, Total: 2, WallMS: 50}) }()
+		close(start)
+		wg.Wait()
+		for _, err := range errs {
+			if err != nil {
+				t.Fatalf("并发上报不应失败: %v", err)
+			}
+		}
+	}
+	ga, _ := s.AgentByID(a.ID)
+	gb, _ := s.AgentByID(b.ID)
+	if ga.Games != 10 || gb.Games != 10 {
+		t.Fatalf("10 场对局应恰好各结算一次: A games=%d B games=%d", ga.Games, gb.Games)
+	}
+	if ga.Wins != 10 || gb.Losses != 10 {
+		t.Fatalf("胜负统计异常: A wins=%d B losses=%d", ga.Wins, gb.Losses)
+	}
+}
+
+// TestSettleParallelMatches 对抗性：多场对局结算真并行（两个 goroutine 各自
+// 补上不同 match 的 b 侧，触发多场 settle 同时进行）。settle 的"读 agents →
+// 算 → 写 agents"若非原子，并发结算会互相覆盖（丢失更新）：N 场并行结算后
+// games 必须精确 = N。旧实现在此用例下 30 场仅剩 16 场统计（红测证据）。
+func TestSettleParallelMatches(t *testing.T) {
+	const n = 30
+	s := openTest(t)
+	a, _ := s.CreateAgent("A")
+	b, _ := s.CreateAgent("B")
+	ids := make([]int64, n)
+	for i := range ids {
+		mid, err := s.CreateMatch("fix-add", a.ID, b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids[i] = mid
+		// 每场只写 a 侧，b 侧留到并发阶段（避免串行提前结算）
+		if _, err := s.AddResult(mid, "a", Result{Passed: 2, Total: 2, WallMS: 100}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 多路 goroutine 并发上报 b 侧 → 多场结算真并行
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	for i, mid := range ids {
+		wg.Add(1)
+		go func(i int, mid int64) {
+			defer wg.Done()
+			_, errs[i] = s.AddResult(mid, "b", Result{Passed: 1, Total: 2, WallMS: 50})
+		}(i, mid)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("match %d 并发上报不应失败: %v", i, err)
+		}
+	}
+	ga, _ := s.AgentByID(a.ID)
+	gb, _ := s.AgentByID(b.ID)
+	if ga.Games != n || gb.Games != n {
+		t.Fatalf("丢失更新: %d 场并行结算后 A games=%d B games=%d (应均为 %d)", n, ga.Games, gb.Games, n)
+	}
+	if ga.Wins != n || gb.Losses != n {
+		t.Fatalf("胜负统计异常: A wins=%d B losses=%d (应均为 %d)", ga.Wins, gb.Losses, n)
 	}
 }
