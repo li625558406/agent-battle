@@ -42,3 +42,19 @@
 **遗留事项**：
 - 设计已批准，待进入实现计划（writing-plans）阶段
 - 技术栈（Go + Next.js + PG/Redis）为建议值，实现计划阶段最终确认
+
+## 2026-09-13 · mirror fail-fast + CLI 细节修复 + fix-add 判分加固（M1 runner-core）
+
+**主题**：质量审查 Important-1/2 与 Minor（M3/M5/M7/M9）修复
+
+**核心变更**：
+- Important-1：`session.Mirror` 开跑前任务级预检 fail-fast——`loadTask`（复用 session.go 同包函数）失败或 `tests/manifest.json` 缺失直接返回 error，不再把任务配置错误按"该侧 agent 崩溃"统计出垃圾汇总且 exit 0（`mirror --task ./nope` 现为 exit 1 + 明确报错）
+- Important-2：`examples/fix-add` file-only-change 判分命令重写为 `git status --porcelain` 方案——旧 `git diff HEAD` 看不见 untracked 文件（审查建议命令实测被"夹带 untracked 文件"击穿），且 judge 会在沙箱写入 untracked `.gitignore` 需排除。新语义：排除 .gitignore 后脏条目 ≤1 且（为 0 或恰为 calc.sh），且 `git rev-list --count HEAD` 恒为 1（agent commit 架空 diff 时计数 >1 → 挂）。9 情形矩阵实测全符合预期，已重签名
+- M3：CLI 新增 `parseFlags` 助手（env.go），`flag.ErrHelp` 视为帮助请求：打印 usage、立即返回、exit 0 且无误导错误行（run/mirror/sign 三个子命令接入）
+- M5：mirror.go 错误路径注释如实化（pre-sandbox 失败时 Dir 为空串）
+- M9：sign 成功信息改输出 stdout（与 run/mirror 一致），移除多余 os 导入
+- M7：envFlag 重复 K 覆盖旧值（EqualFold 匹配、保最后出现），与 Go 子进程环境去重语义一致
+
+**遗留事项**：
+- TestRunCommandTimeout（judge 包）在全量并发跑时偶发超时抖动（100ms 注入超时时序敏感），独立/复跑稳定通过，与本次改动无关，后置观察
+- file-only-change 仅守"改动范围 = calc.sh"，内容正确性由 add-basic 把守；只删 calc.sh 会过 file-only-change（语义如此，范围合法），由 add-basic 兜底判负

@@ -1,7 +1,13 @@
 {
   "task_id": "fix-add",
   "tests": [
-    { "name": "add-basic", "cmd": "bash .judge/run_tests.sh" },
-    { "name": "file-only-change", "cmd": "bash -c '[ \"$(git diff HEAD --name-only)\" = \"calc.sh\" ] || [ -z \"$(git diff HEAD --name-only)\" ]'" }
+    {
+      "name": "add-basic",
+      "cmd": "bash .judge/run_tests.sh"
+    },
+    {
+      "name": "file-only-change",
+      "cmd": "bash -c 'n=$(git status --porcelain | grep -cv \" \\.gitignore$\"); [ \"$n\" -le 1 ] && { [ \"$n\" -eq 0 ] || git status --porcelain | grep -v \" \\.gitignore$\" | grep -q \" calc\\.sh$\"; } && [ \"$(git rev-list --count HEAD)\" = \"1\" ]'"
+    }
   ]
 }
