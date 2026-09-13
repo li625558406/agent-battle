@@ -3,11 +3,16 @@ package client
 import (
 	"archive/zip"
 	"bytes"
+	"compress/gzip"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -216,5 +221,252 @@ func TestGzipEvents(t *testing.T) {
 	}
 	if strings.Contains(string(gz), "tool_call") {
 		t.Fatal("输出不应为明文 NDJSON")
+	}
+}
+
+// TestGzipEventsRoundtrip 验证 gzip 输出 gunzip 后是合法 NDJSON，
+// 逐行 Unmarshal 回 []protocol.Event 与输入逐字段相等。
+func TestGzipEventsRoundtrip(t *testing.T) {
+	events := []protocol.Event{
+		{Seq: 1, TS: 1000, Type: protocol.EventToolCall, Tool: "edit_file", ArgsHash: "ah1", DurationMS: 12, PrevHash: "", Hash: "h1"},
+		{Seq: 2, TS: 2000, Type: protocol.EventResult, Tokens: 42, Note: "done", PrevHash: "h1", Hash: "h2"},
+		{Seq: 3, TS: 3000, Type: protocol.EventFileEdit, Hash: "h3"},
+	}
+	gz, err := GzipEvents(events)
+	if err != nil {
+		t.Fatalf("GzipEvents 失败: %v", err)
+	}
+
+	zr, err := gzip.NewReader(bytes.NewReader(gz))
+	if err != nil {
+		t.Fatalf("输出不是合法 gzip: %v", err)
+	}
+	defer zr.Close()
+	raw, err := io.ReadAll(zr)
+	if err != nil {
+		t.Fatalf("gunzip 失败: %v", err)
+	}
+
+	var got []protocol.Event
+	for i, line := range strings.Split(string(raw), "\n") {
+		if line == "" {
+			continue
+		}
+		var e protocol.Event
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			t.Fatalf("第 %d 行不是合法 JSON: %v (line=%q)", i+1, err, line)
+		}
+		got = append(got, e)
+	}
+	if len(got) != len(events) {
+		t.Fatalf("roundtrip 事件数不符: got %d want %d", len(got), len(events))
+	}
+	if !reflect.DeepEqual(got, events) {
+		t.Fatalf("roundtrip 事件不一致:\ngot  %+v\nwant %+v", got, events)
+	}
+}
+
+// TestCreateMatchRequestBody 校验 /api/matches 请求体字段完整且值正确。
+func TestCreateMatchRequestBody(t *testing.T) {
+	var gotBody map[string]string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/matches", func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprintf(w, `{"error":"body 不是合法 JSON: %v"}`, err)
+			return
+		}
+		if gotBody["task_id"] == "" || gotBody["agent_a"] == "" || gotBody["agent_b"] == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"error":"缺少必填字段"}`)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, `{"match_id":7,"judge_key":"dev-secret"}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := New(srv.URL)
+	matchID, _, err := c.CreateMatch("tok", "fix-add", "alice", "bob")
+	if err != nil {
+		t.Fatalf("CreateMatch 失败: %v", err)
+	}
+	if matchID != 7 {
+		t.Fatalf("matchID=%d, want 7", matchID)
+	}
+	want := map[string]string{"task_id": "fix-add", "agent_a": "alice", "agent_b": "bob"}
+	if !reflect.DeepEqual(gotBody, want) {
+		t.Fatalf("请求体字段错误:\ngot  %v\nwant %v", gotBody, want)
+	}
+}
+
+// TestUploadResultRequestBody 校验 /api/matches/7/results 请求体字段，
+// 以及 EventsGZ 经 base64 解码后是合法 gzip（gunzip 出合法 NDJSON）。
+func TestUploadResultRequestBody(t *testing.T) {
+	events := []protocol.Event{
+		{Seq: 1, TS: 1000, Type: protocol.EventToolCall, Hash: "h1"},
+		{Seq: 2, TS: 2000, Type: protocol.EventResult, PrevHash: "h1", Hash: "h2"},
+	}
+	eventsGZ, err := GzipEvents(events)
+	if err != nil {
+		t.Fatalf("构造 EventsGZ 失败: %v", err)
+	}
+
+	var gotBody map[string]any
+	var gotRaw []byte
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/matches/7/results", func(w http.ResponseWriter, r *http.Request) {
+		bs, err := io.ReadAll(r.Body)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		gotRaw = bs
+		if err := json.Unmarshal(bs, &gotBody); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprintf(w, `{"error":"body 不是合法 JSON: %v"}`, err)
+			return
+		}
+		if gotBody["side"] != "a" || gotBody["passed"] != float64(2) || gotBody["total"] != float64(2) || gotBody["wall_ms"] != float64(100) {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"error":"字段值错误"}`)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, `{"status":"done","winner":"a"}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := New(srv.URL)
+	settle, err := c.UploadResult("tok", 7, ResultIn{
+		Side: "a", Passed: 2, Total: 2, WallMS: 100,
+		DiffHash: "abc123", EventsGZ: eventsGZ,
+	})
+	if err != nil {
+		t.Fatalf("UploadResult 失败: %v", err)
+	}
+	if settle.Status != "done" || settle.Winner != "a" {
+		t.Fatalf("结算错误: %+v", settle)
+	}
+
+	// 字段值断言（Decode 后）
+	if gotBody["side"] != "a" {
+		t.Fatalf("side=%v, want \"a\"", gotBody["side"])
+	}
+	if gotBody["passed"] != float64(2) || gotBody["total"] != float64(2) {
+		t.Fatalf("passed/total=%v/%v, want 2/2", gotBody["passed"], gotBody["total"])
+	}
+	if gotBody["wall_ms"] != float64(100) {
+		t.Fatalf("wall_ms=%v, want 100", gotBody["wall_ms"])
+	}
+	if gotBody["diff_hash"] != "abc123" {
+		t.Fatalf("diff_hash=%v, want \"abc123\"", gotBody["diff_hash"])
+	}
+
+	// events_gz_base64 → 解码 → 合法 gzip → 合法 NDJSON
+	b64, _ := gotBody["events_gz_base64"].(string)
+	if b64 == "" {
+		t.Fatalf("请求体缺少 events_gz_base64: %s", gotRaw)
+	}
+	gzBytes, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		t.Fatalf("events_gz_base64 不是合法 base64: %v", err)
+	}
+	zr, err := gzip.NewReader(bytes.NewReader(gzBytes))
+	if err != nil {
+		t.Fatalf("events_gz_base64 解码后不是合法 gzip: %v", err)
+	}
+	defer zr.Close()
+	raw, err := io.ReadAll(zr)
+	if err != nil {
+		t.Fatalf("gunzip 失败: %v", err)
+	}
+	var gotEvents []protocol.Event
+	for i, line := range strings.Split(string(raw), "\n") {
+		if line == "" {
+			continue
+		}
+		var e protocol.Event
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			t.Fatalf("第 %d 行不是合法 JSON: %v (line=%q)", i+1, err, line)
+		}
+		gotEvents = append(gotEvents, e)
+	}
+	if !reflect.DeepEqual(gotEvents, events) {
+		t.Fatalf("事件流 roundtrip 不一致:\ngot  %+v\nwant %+v", gotEvents, events)
+	}
+}
+
+// TestUploadResultRequiresToken 校验 /api/matches/7/results 的 X-Token：
+// 缺失或不符时 stub 返回 401，客户端应报错。
+func TestUploadResultRequiresToken(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/matches/7/results", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Token") != "tok-right" {
+			w.WriteHeader(http.StatusUnauthorized)
+			fmt.Fprint(w, `{"error":"未认证"}`)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, `{"status":"done","winner":"a"}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := New(srv.URL)
+	in := ResultIn{Side: "a", Passed: 2, Total: 2, WallMS: 100}
+
+	// 缺失 token（空串 → 客户端不带 X-Token 头）
+	if _, err := c.UploadResult("", 7, in); err == nil {
+		t.Fatal("缺失 X-Token 应返回错误")
+	} else if !strings.Contains(err.Error(), "401") {
+		t.Fatalf("错误信息应含 401: %v", err)
+	}
+
+	// token 不符
+	if _, err := c.UploadResult("tok-wrong", 7, in); err == nil {
+		t.Fatal("X-Token 不符应返回错误")
+	} else if !strings.Contains(err.Error(), "401") {
+		t.Fatalf("错误信息应含 401: %v", err)
+	}
+
+	// 正确 token 应成功
+	if _, err := c.UploadResult("tok-right", 7, in); err != nil {
+		t.Fatalf("正确 token 不应报错: %v", err)
+	}
+}
+
+// TestExtractBundleRejectsOversizedEntry 构造一个 64MB+1 字节（全零，压缩后很小）
+// 的条目，断言被 64MB 上限拒绝且目标目录没有写出该文件。
+func TestExtractBundleRejectsOversizedEntry(t *testing.T) {
+	oversized := bytes.Repeat([]byte{0}, (64<<20)+1)
+	zipBytes := buildZip(t, []zipEntry{
+		{Name: "normal.txt", Data: "ok"},
+		{Name: "bomb.bin", Data: string(oversized)},
+	})
+	dest := t.TempDir()
+
+	if err := ExtractBundle(zipBytes, dest); err == nil {
+		t.Fatal("超过 64MB 的条目应被拒绝")
+	} else if !strings.Contains(err.Error(), "64MB") {
+		t.Fatalf("错误信息应说明 64MB 上限: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dest, "bomb.bin")); err == nil {
+		t.Fatal("超限文件不应被写出")
+	}
+	// 超限条目在 bomb.bin 之前成功写出，属预期（逐条目处理）；只断言恶意条目未落盘。
+	if _, err := os.Stat(filepath.Join(dest, "normal.txt")); err != nil {
+		t.Logf("提示: normal.txt 未写出（条目顺序在超限条目之前被中断）: %v", err)
+	}
+}
+
+// TestExtractBundleCorruptZip 非法 zip 字节应返回错误而非 panic。
+func TestExtractBundleCorruptZip(t *testing.T) {
+	dest := t.TempDir()
+	if err := ExtractBundle([]byte("not a zip"), dest); err == nil {
+		t.Fatal("损坏的 zip 应返回错误")
 	}
 }
