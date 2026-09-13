@@ -22,16 +22,23 @@
 
 ## 3. 六维规则指标定义
 
-每维先算每局原始分，窗口内做**百分位归一化**（percentile rank × 100）。窗口 = 同 agent × 同 task_type 的最近 50 局（按对局完成时间）。样本 < 5 局时画像标注 `low_sample: true` 并附样本量。
+每维先算每局原始分，再做**百分位归一化**（percentile rank × 100）。两个集合必须区分：
+
+- **自身窗口**：同 agent × 同 task_type 的最近 50 局（按结算时间倒序）——决定"哪些局参与画像"与样本量
+- **归一化基线**：同 task_type 下**全体 agent** 的最近 200 局已完成对局——某局某指标的分数 = 该值在基线分布中的百分位（低好指标取 100 减百分位）
+
+基线必须是全体 agent 的池而非自身窗口：否则每个 agent 的分位恒在自身分布中心附近（均匀表现的 agent 恒得约 50 分），画像无法区分好坏，"复现已知差异"验收不成立。
+
+样本 < 5 局时画像标注 `low_sample: true` 并附样本量。
 
 | 维度 | 规则口径 | 方向 |
 |---|---|---|
 | 正确性 correctness | 窗口内 passed/total 均值 + 全通过局占比（两项各半权重合成） | 越高越好 |
-| 调试能力 debugging | 含 error 事件局中的最终通过率（报错后恢复率）；无错误局不参与；窗口内全无错误局时按正确性联动记满分 | 越高越好 |
-| 工具效率 tool_efficiency | 每局 tool_call 数 + error 事件/tool_call 比率（无效调用近似） | 越低/越低越好 |
-| 成本控制 cost | tokens 总量 + wall_ms | 越低越好 |
-| 规划能力 planning | 首个 file_edit 前的 tool_call 占比（前置探查比）；局内无 file_edit 时不参与该维（同调试能力的缺席处理） | 越高越好 |
-| 稳定性 stability | agent_error/超时局占比 + 跨局通过率方差 | 越低越好 |
+| 调试能力 debugging | 含 error 事件局中的最终通过率（报错后恢复率）；无错误局不参与；自身窗口内全无错误局时该维直接记满分（raw=1） | 越高越好 |
+| 工具效率 tool_efficiency | 每局 tool_call 数 + error 事件/tool_call 比率（无效调用近似）；仅事件流可用的局参与 | 越低/越低越好 |
+| 成本控制 cost | tokens 总量 + wall_ms；仅事件流可用的局参与（无事件流时 tokens=0 会假性最优） | 越低越好 |
+| 规划能力 planning | 首个 file_edit 前的 tool_call 占比（前置探查比 = 首 edit 前 tool_call 数 / max(总 tool_call,1)）；局内无 file_edit 时不参与该维（同调试能力的缺席处理） | 越高越好 |
+| 稳定性 stability | 崩溃局（total==0，runner 既有契约：崩溃侧按 0/0 上报）0/1 值 + 通过率对窗口均值的偏离度，两项均为低好 | 越低越好 |
 
 ## 4. 架构与数据流
 
@@ -52,9 +59,9 @@ settle 完成（handleResult 双侧到齐）
   - `metrics.go`：单局提取，输入 events + report + err → `MatchMetrics`；只依赖 protocol 与 store 的读取接口，不 import api
   - `profile.go`：窗口聚合 + 分位归一化 → `Profile`（JSON 形态含六维分、每维原始值、样本量、low_sample 标注、updated_at）
 - **store 扩展**
-  - `matches` 表加 `task_type` 列（`CreateMatch` 时从任务目录 task.json 读入，缺省 `general`）
+  - `matches` 表加 `task_type` 列（`CreateMatch` 时从任务目录 task.json 读入，缺省 `general`；含旧库 ALTER 迁移）
   - 新表 `agent_profiles(agent_id, task_type, sample_size, profile_json, updated_at)`，主键 (agent_id, task_type)，覆盖式 upsert
-  - 提供窗口原始数据查询（agent × task_type 近 50 局的 events/results/err）
+  - 提供两个查询：自身窗口（agent × task_type 近 50 局 done 对局的本方结果）、归一化基线（task_type 全体近 200 局 done 对局）
 - **task_type 源头**：task.json 可选字段；mirror/fetch/bundle 链路不感知不改动
 - **api**：handleResult settle 成功后调 `profile.Recompute`（失败仅 log 降级不阻断结算响应，下局重算自然修复）；新路由 `GET /api/agents/{name}/profile`，不存在 agent 与无对局空画像明确区分（404 / 空对象）
 - **runner CLI**：`profile --server <url> --name <agent>` 子命令，六维表格输出（text/tabwriter，沿用 ladder 风格）
