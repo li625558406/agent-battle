@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"agentbattle/protocol"
@@ -59,6 +60,27 @@ func SignDir(taskDir string, key []byte) error {
 		return fmt.Errorf("judge: write sig: %w", err)
 	}
 	return nil
+}
+
+// VerifyDir 校验任务目录判分包签名与结构完整性，不执行任何测试。
+// 供对局编排/平台对接在开赛前预检，避免坏判分包（签名被篡改/缺失）污染整场统计。
+// manifest 缺失、非法 JSON、sig 缺失、签名不符均返回带原因的 error。
+func VerifyDir(taskDir string, key []byte) error {
+	_, err := verifyManifest(filepath.Join(taskDir, "tests"), key)
+	return err
+}
+
+// gitEnv 返回过滤掉 GIT_DIR/GIT_WORK_TREE 的宿主环境副本，防止 judge 内的
+// git 调用被宿主 shell 残留的环境变量误指到别的仓库（与 sandbox 包同款防御）。
+func gitEnv() []string {
+	env := make([]string, 0, len(os.Environ()))
+	for _, e := range os.Environ() {
+		if k, _, ok := strings.Cut(e, "="); ok && (strings.EqualFold(k, "GIT_DIR") || strings.EqualFold(k, "GIT_WORK_TREE")) {
+			continue
+		}
+		env = append(env, e)
+	}
+	return env
 }
 
 // verifyManifest 读取 manifest 与 sig，HMAC 恒时比较。
@@ -151,7 +173,7 @@ func runOne(tc protocol.TestCommand, sandbox, baselineSHA string) protocol.TestR
 	cmd := exec.CommandContext(ctx, "bash", "-c", tc.Cmd)
 	cmd.Dir = sandbox
 	if baselineSHA != "" {
-		cmd.Env = append(os.Environ(), "AGENTBATTLE_BASELINE_SHA="+baselineSHA)
+		cmd.Env = append(gitEnv(), "AGENTBATTLE_BASELINE_SHA="+baselineSHA)
 	}
 	// 超时 kill 只杀 bash 自身；其孤儿子进程可能继承 stdout 管道导致
 	// Wait 永久阻塞（如 sleep infinity）。WaitDelay 保证 kill 后最迟
@@ -183,6 +205,7 @@ func runOne(tc protocol.TestCommand, sandbox, baselineSHA string) protocol.TestR
 func hashGitDiff(sandbox string) (string, error) {
 	cmd := exec.Command("git", "diff", "HEAD")
 	cmd.Dir = sandbox
+	cmd.Env = gitEnv()
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = io.Discard

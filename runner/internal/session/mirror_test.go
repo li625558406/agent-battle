@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"agentbattle/runner/internal/adapter"
@@ -77,6 +78,34 @@ func TestMirrorTieOnBothFail(t *testing.T) {
 	}
 	if sum.Ties != 2 || sum.WinsA != 0 || sum.WinsB != 0 {
 		t.Fatalf("期望全平局, got: winsA=%d winsB=%d ties=%d", sum.WinsA, sum.WinsB, sum.Ties)
+	}
+}
+
+// TestMirrorPreflightRejectsBadManifest：坏判分包（签名不符）必须在预检阶段
+// 拦截并报错，而不是跑完 N 局后在判分阶段失败、污染整场统计。
+func TestMirrorPreflightRejectsBadManifest(t *testing.T) {
+	taskDir := newTask(t)
+	// 破坏签名：改写 manifest 真实内容（追加空白不会改变 canonical 形态）。
+	mPath := filepath.Join(taskDir, "tests", "manifest.json")
+	b, err := os.ReadFile(mPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tampered := strings.Replace(string(b), `"t1"`, `"t9"`, 1)
+	if tampered == string(b) {
+		t.Fatal("tamper payload did not modify manifest")
+	}
+	if err := os.WriteFile(mPath, []byte(tampered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := MirrorConfig{
+		TaskDir: taskDir, JudgeKey: []byte(DevJudgeKey), Rounds: 1,
+		OutDir: t.TempDir(),
+		MakeA:  func() adapter.Adapter { return adapter.Echo{} },
+		MakeB:  func() adapter.Adapter { return adapter.Echo{} },
+	}
+	if _, err := Mirror(context.Background(), cfg); err == nil {
+		t.Fatal("bad manifest must fail preflight, not poison N rounds")
 	}
 }
 

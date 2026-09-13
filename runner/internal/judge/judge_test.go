@@ -245,6 +245,79 @@ func TestRunEmptyBaselineNoInjection(t *testing.T) {
 	}
 }
 
+// 宿主环境恶意 GIT_DIR/GIT_WORK_TREE 不得影响 judge 内的 git 调用：
+// hashGitDiff 的 git diff 与判分命令内的 git（baseline-check）都必须
+// 操作沙箱仓库而非 hostile.git，否则 Run 报错 / 校验命令失败。
+func TestRunIgnoresHostGitDirEnv(t *testing.T) {
+	taskDir, sb := setupTask(t, protocol.TestCommand{Name: "baseline-check", Cmd: baselineCmd})
+	hostile := filepath.Join(t.TempDir(), "hostile.git")
+	baseline := gitRev(t, sb)
+	t.Setenv("GIT_DIR", hostile)
+	t.Setenv("GIT_WORK_TREE", ".")
+	rep, err := Run(taskDir, sb, baseline, []byte(devKey))
+	if err != nil {
+		t.Fatalf("host GIT_DIR leaked into judge git calls: %v", err)
+	}
+	if rep.Total == 0 {
+		t.Fatal("expected tests to run")
+	}
+	var check *protocol.TestResult
+	for i := range rep.Results {
+		if rep.Results[i].Name == "baseline-check" {
+			check = &rep.Results[i]
+		}
+	}
+	if check == nil || !check.Passed {
+		t.Fatalf("baseline-check must pass with hostile GIT_DIR filtered, got: %+v", check)
+	}
+}
+
+// VerifyDir 对合法签名目录必须放行。
+func TestVerifyDirAcceptsValidDir(t *testing.T) {
+	taskDir, _ := setupTask(t)
+	if err := VerifyDir(taskDir, []byte(devKey)); err != nil {
+		t.Fatalf("valid dir rejected: %v", err)
+	}
+}
+
+// 对抗：manifest 内容被篡改后 VerifyDir 必须拒绝。
+func TestVerifyDirRejectsTamperedManifest(t *testing.T) {
+	taskDir, _ := setupTask(t)
+	mPath := filepath.Join(taskDir, "tests", "manifest.json")
+	b, err := os.ReadFile(mPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 追加空白不会改变 canonical 形态（验签设计如此），这里改真实内容。
+	tampered := strings.Replace(string(b), `"t1"`, `"t9"`, 1)
+	if tampered == string(b) {
+		t.Fatal("tamper payload did not modify manifest")
+	}
+	if err := os.WriteFile(mPath, []byte(tampered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyDir(taskDir, []byte(devKey)); err == nil {
+		t.Fatal("tampered manifest accepted")
+	}
+}
+
+// 对抗：manifest 或 sig 缺失时 VerifyDir 必须带原因拒绝。
+func TestVerifyDirRejectsMissingPieces(t *testing.T) {
+	taskDir, _ := setupTask(t)
+	if err := os.Remove(filepath.Join(taskDir, "tests", "sig")); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyDir(taskDir, []byte(devKey)); err == nil {
+		t.Fatal("missing sig accepted")
+	}
+	if err := os.Remove(filepath.Join(taskDir, "tests", "manifest.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyDir(taskDir, []byte(devKey)); err == nil {
+		t.Fatal("missing manifest accepted")
+	}
+}
+
 // M3：.gitignore 幂等检查以 ".judge/"（带斜杠）为准，重复 Run 不产生重复行。
 func TestIgnoreJudgeDirIdempotent(t *testing.T) {
 	sb := t.TempDir()

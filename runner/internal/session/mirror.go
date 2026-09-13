@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"agentbattle/runner/internal/adapter"
+	"agentbattle/runner/internal/judge"
 )
 
 // MirrorConfig 描述一场镜像对战。
@@ -64,15 +65,15 @@ func Mirror(ctx context.Context, cfg MirrorConfig) (Summary, error) {
 	if cfg.MakeA == nil || cfg.MakeB == nil {
 		return Summary{}, fmt.Errorf("MakeA/MakeB 未设置")
 	}
-	// 任务级预检，fail-fast：task.json 缺失/损坏、判分包缺失属于任务配置
-	// 错误，与 agent 无关。若不拦截，每局会在沙箱创建前失败并被一律按
-	// "该侧 agent 崩溃" 计入统计，最终静默产出垃圾汇总且 exit 0。
+	// 任务级预检，fail-fast：task.json 缺失/损坏、判分包缺失或验签不通过
+	// 属于任务配置错误，与 agent 无关。若不拦截，每局会在沙箱创建前失败并被
+	// 一律按 "该侧 agent 崩溃" 计入统计，最终静默产出垃圾汇总且 exit 0。
 	task, err := loadTask(cfg.TaskDir)
 	if err != nil {
 		return Summary{}, fmt.Errorf("任务预检失败: %w", err)
 	}
-	if _, err := os.Stat(filepath.Join(cfg.TaskDir, "tests", "manifest.json")); err != nil {
-		return Summary{}, fmt.Errorf("任务预检失败: 判分包缺失 tests/manifest.json: %w", err)
+	if err := judge.VerifyDir(cfg.TaskDir, cfg.JudgeKey); err != nil {
+		return Summary{}, fmt.Errorf("判分包预检失败: %w", err)
 	}
 	taskID := task.TaskID
 	sum := Summary{TaskID: taskID, Rounds: cfg.Rounds,
