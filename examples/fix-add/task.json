@@ -1,0 +1,6 @@
+{
+  "task_id": "fix-add",
+  "name": "修复 add 函数",
+  "description": "seed/calc.sh 中的 add() 函数有 bug：计算 a-b。请修复为计算 a+b。只修改 calc.sh。",
+  "timeout_sec": 600
+}
