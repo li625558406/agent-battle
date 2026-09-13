@@ -59,9 +59,18 @@ func TestPrintReview(t *testing.T) {
 			t.Fatalf("输出缺 %q:\n%s", want, out)
 		}
 	}
-	// 无事件侧的 event 类指标渲染 "—"（tokens 行 B 列）
-	if !strings.Contains(out, "—") {
-		t.Fatalf("无事件侧 event 类指标应渲染 —:\n%s", out)
+	// 无事件侧的 event 类指标渲染 "—"：tool_call 行 A=1（有事件）、B=—（无事件流）
+	found := false
+	for _, ln := range strings.Split(out, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(ln), "tool_call") {
+			if !strings.Contains(ln, "1") || !strings.Contains(ln, "—") {
+				t.Fatalf("tool_call 行应含 A=1 与 B=—: %q", ln)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("输出缺 tool_call 行:\n%s", out)
 	}
 
 	// 平局：winner="tie" → 胜者显示 平局
@@ -71,6 +80,17 @@ func TestPrintReview(t *testing.T) {
 	printReview(&buf, rep)
 	if !strings.Contains(buf.String(), "胜者 平局") {
 		t.Fatalf("平局应显示 平局:\n%s", buf.String())
+	}
+
+	// 全零值报告（nil map）不 panic，渲染占位与平局文案
+	buf.Reset()
+	printReview(&buf, client.ReviewReport{})
+	zero := buf.String()
+	if !strings.Contains(zero, "（无事件流）") {
+		t.Fatalf("零值报告应含（无事件流）:\n%s", zero)
+	}
+	if !strings.Contains(zero, "胜者 平局") {
+		t.Fatalf("零值报告胜者应为 平局:\n%s", zero)
 	}
 }
 
@@ -87,6 +107,9 @@ func TestCmdReviewNegative(t *testing.T) {
 	}
 	if err := cmdReview([]string{"--server", "http://x", "--match", "-3"}); err == nil {
 		t.Fatal("--match 负数应报错")
+	}
+	if err := cmdReview([]string{"--server", "http://x", "--match", "abc"}); err == nil {
+		t.Fatal("--match 非数字应报错")
 	}
 
 	// 404 透传

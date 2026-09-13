@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"text/tabwriter"
+	"unicode"
 
 	"agentbattle/runner/internal/client"
 )
@@ -37,6 +38,19 @@ func runReview(w io.Writer, server string, matchID int64) error {
 	}
 	printReview(w, rep)
 	return nil
+}
+
+// sanitize 渲染净化：剥离控制字符（含 ANSI 转义序列的 ESC）并替换
+// 非法 UTF-8——Tool/Path 源自对手自报的事件流，公开路由数据不可信。
+func sanitize(s string) string {
+	s = strings.ToValidUTF8(s, "")
+	var b strings.Builder
+	for _, r := range s {
+		if !unicode.IsControl(r) {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // printReview 渲染复盘：结论行 + 双侧概要 + 对比表 + 双侧时间线。
@@ -104,10 +118,10 @@ func printReview(w io.Writer, rep client.ReviewReport) {
 		for _, e := range evs {
 			line := fmt.Sprintf("  #%d %s", e.Seq, e.Type)
 			if e.Tool != "" {
-				line += " " + e.Tool
+				line += " " + sanitize(e.Tool)
 			}
 			if e.Path != "" {
-				line += " " + e.Path
+				line += " " + sanitize(e.Path)
 			}
 			if e.DurationMS > 0 {
 				line += fmt.Sprintf(" %dms", e.DurationMS)
