@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 
+	"agentbattle/platform/internal/profile"
 	"agentbattle/platform/internal/store"
 )
 
@@ -35,6 +36,7 @@ func New(st *store.Store, tasksDir string, judgeKey []byte) http.Handler {
 	mux.Handle("POST /api/matches", s.auth(s.handleCreateMatch))
 	mux.Handle("POST /api/matches/{id}/results", s.auth(s.handleResult))
 	mux.HandleFunc("GET /api/ladder", s.handleLadder)
+	mux.HandleFunc("GET /api/agents/{name}/profile", s.handleProfile)
 	mux.HandleFunc("GET /api/tasks/{id}/bundle", s.handleBundle)
 	return mux
 }
@@ -147,7 +149,7 @@ func (s *Server) handleCreateMatch(w http.ResponseWriter, r *http.Request, ag st
 		writeErr(w, http.StatusBadRequest, "agent_b 不存在: "+body.AgentB)
 		return
 	}
-	id, err := s.St.CreateMatch(body.TaskID, "general", a.ID, b.ID)
+	id, err := s.St.CreateMatch(body.TaskID, readTaskType(s.TasksDir, body.TaskID), a.ID, b.ID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "创建对局失败")
 		return
@@ -222,8 +224,20 @@ func (s *Server) handleResult(w http.ResponseWriter, r *http.Request, ag store.A
 		writeJSON(w, http.StatusOK, map[string]any{"status": "waiting"})
 		return
 	}
+	// 画像重算（M2）：结算成功后同步重建双方画像。失败仅记日志降级，
+	// 不阻断结算响应——幂等保证下局结算重算自愈。
+	if tt, terr := s.St.TaskTypeOf(matchID); terr != nil {
+		log.Printf("对局 %d 读 task_type 失败（跳过画像重算）: %v", matchID, terr)
+	} else {
+		for _, aid := range []int64{aID, bID} {
+			if rerr := profile.Recompute(s.St, aid, tt); rerr != nil {
+				log.Printf("对局 %d 画像重算失败（agent %d）: %v", matchID, aid, rerr)
+			}
+		}
+	}
 	// 已结算：回读 winner 与双方最新 rating
 	_, _, _, _, winner, err := s.St.MatchByID(matchID)
+
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "结算后回读对局失败")
 		return
@@ -313,4 +327,55 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 		panic(http.ErrAbortHandler)
 	}
 	zw.Close()
+}
+
+// readTaskType 从任务目录 task.json 读取 task_type。缺字段/解析失败/空值
+// 一律归一 "general"（旧任务包向后兼容；任务元数据不可信，宁缺毋滥）。
+func readTaskType(tasksDir, taskID string) string {
+	b, err := os.ReadFile(filepath.Join(tasksDir, taskID, "task.json"))
+	if err != nil {
+		return "general"
+	}
+	var meta struct {
+		TaskType string `json:"task_type"`
+	}
+	if json.Unmarshal(b, &meta) != nil {
+		return "general"
+	}
+	if tt := strings.TrimSpace(meta.TaskType); tt != "" {
+		return tt
+	}
+	return "general"
+}
+
+// handleProfile GET /api/agents/{name}/profile：agent 全部 task_type 的画像。
+// 未知 agent → 404；已知 agent 无对局 → 200 空数组（语义区分）。
+// 公开路由（同天梯）：画像只含 agent 名与分数，无 token 无配置内容。
+func (s *Server) handleProfile(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if _, ok, err := s.St.AgentByName(name); err != nil || !ok {
+		writeErr(w, http.StatusNotFound, "agent 不存在")
+		return
+	}
+	profs, err := s.St.ProfilesByAgent(name)
+	if err != nil {
+		log.Printf("读 agent %q 画像失败: %v", name, err)
+		writeErr(w, http.StatusInternalServerError, "读画像失败")
+		return
+	}
+	if profs == nil {
+		profs = []store.StoredProfile{}
+	}
+	type profileOut struct {
+		TaskType    string `json:"task_type"`
+		SampleSize  int    `json:"sample_size"`
+		ProfileJSON string `json:"profile_json"`
+		UpdatedAt   int64  `json:"updated_at"`
+	}
+	out := make([]profileOut, len(profs))
+	for i, p := range profs {
+		out[i] = profileOut{TaskType: p.TaskType, SampleSize: p.SampleSize,
+			ProfileJSON: p.ProfileJSON, UpdatedAt: p.UpdatedAt}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"agent": name, "profiles": out})
 }

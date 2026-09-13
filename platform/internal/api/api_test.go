@@ -3,7 +3,9 @@ package api
 import (
 	"archive/zip"
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -416,4 +418,112 @@ func zipNames(zr *zip.Reader) []string {
 		out = append(out, f.Name)
 	}
 	return out
+}
+
+// ---------- M2 画像：task_type / 结算钩子 / 查询路由 ----------
+
+// profileResp 是 GET /api/agents/{name}/profile 的响应形态。
+type profileResp struct {
+	Agent    string `json:"agent"`
+	Profiles []struct {
+		TaskType    string `json:"task_type"`
+		SampleSize  int    `json:"sample_size"`
+		ProfileJSON string `json:"profile_json"`
+		UpdatedAt   int64  `json:"updated_at"`
+	} `json:"profiles"`
+}
+
+// playMatch 经 HTTP 注册两名 agent、创建对局、双侧上报（A 全过 / B 半过）
+// 触发结算，返回双方 token。
+func playMatch(t *testing.T, srv *httptest.Server, nameA, nameB string) (tokA, tokB string) {
+	t.Helper()
+	tokA = register(t, srv, nameA)
+	tokB = register(t, srv, nameB)
+	resp, m := do(t, "POST", srv.URL+"/api/matches", tokA,
+		map[string]any{"task_id": "demo", "agent_a": nameA, "agent_b": nameB})
+	if resp.StatusCode != 201 {
+		t.Fatalf("创建对局: %d", resp.StatusCode)
+	}
+	mid := int64(m["match_id"].(float64))
+	up := func(tok string, side string, passed int) {
+		t.Helper()
+		body := map[string]any{"side": side, "passed": passed, "total": 2, "wall_ms": 100}
+		if side == "a" {
+			body["events_gz_base64"] = base64.StdEncoding.EncodeToString([]byte{})
+		}
+		resp, _ := do(t, "POST", fmt.Sprintf("%s/api/matches/%d/results", srv.URL, mid), tok, body)
+		if resp.StatusCode != 200 {
+			t.Fatalf("上报 %s: %d", side, resp.StatusCode)
+		}
+	}
+	up(tokA, "a", 2)
+	up(tokB, "b", 1)
+	return tokA, tokB
+}
+
+// TestProfileFlow 结算后画像落库、路由可查、404/空画像三分支。
+func TestProfileFlow(t *testing.T) {
+	srv, _ := newServerWithStore(t)
+	playMatch(t, srv, "pa", "pb")
+
+	resp, m := do(t, "GET", srv.URL+"/api/agents/pa/profile", "", nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("查画像: %d", resp.StatusCode)
+	}
+	b, _ := json.Marshal(m)
+	var pr profileResp
+	if err := json.Unmarshal(b, &pr); err != nil {
+		t.Fatal(err)
+	}
+	if pr.Agent != "pa" || len(pr.Profiles) != 1 {
+		t.Fatalf("应 1 条画像: %+v", pr)
+	}
+	prof := pr.Profiles[0]
+	if prof.TaskType != "general" { // demo task.json 无 task_type → 归一
+		t.Fatalf("task_type 应归一 general: %+v", prof)
+	}
+	if prof.SampleSize != 1 || !strings.Contains(prof.ProfileJSON, `"correctness"`) {
+		t.Fatalf("画像内容不符: %+v", prof)
+	}
+
+	// 未知 agent → 404；已知 agent 无对局 → 200 空数组
+	if resp, _ = do(t, "GET", srv.URL+"/api/agents/ghost/profile", "", nil); resp.StatusCode != 404 {
+		t.Fatalf("未知 agent 应 404, got %d", resp.StatusCode)
+	}
+	tokC := register(t, srv, "pc")
+	_ = tokC
+	resp, _ = do(t, "GET", srv.URL+"/api/agents/pc/profile", "", nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("无对局 agent 应 200, got %d", resp.StatusCode)
+	}
+}
+
+// TestProfileKnownDifferenceAPI A 全过 vs B 半过 → A 的 correctness 分严格
+// 高于 B（归一化基线全体池语义在 API 层的验收）。
+func TestProfileKnownDifferenceAPI(t *testing.T) {
+	srv, _ := newServerWithStore(t)
+	playMatch(t, srv, "ka", "kb")
+
+	get := func(name string) float64 {
+		t.Helper()
+		_, m := do(t, "GET", srv.URL+"/api/agents/"+name+"/profile", "", nil)
+		b, _ := json.Marshal(m)
+		var pr profileResp
+		if err := json.Unmarshal(b, &pr); err != nil {
+			t.Fatal(err)
+		}
+		var doc struct {
+			Dims map[string]struct {
+				Score float64 `json:"score"`
+			} `json:"dims"`
+		}
+		if err := json.Unmarshal([]byte(pr.Profiles[0].ProfileJSON), &doc); err != nil {
+			t.Fatal(err)
+		}
+		return doc.Dims["correctness"].Score
+	}
+	sa, sb := get("ka"), get("kb")
+	if sa <= sb {
+		t.Fatalf("画像应复现已知差异: A=%v B=%v", sa, sb)
+	}
 }
