@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"path/filepath"
-	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -79,12 +78,19 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("建表: %w", err)
 	}
-	// 旧库迁移：M1 时期的 matches 表没有 task_type 列。已存在时 ALTER 会报
-	// "duplicate column name"，属预期，静默忽略；其余错误如实上抛。
-	if _, err := db.Exec(`ALTER TABLE matches ADD COLUMN task_type TEXT NOT NULL DEFAULT 'general'`); err != nil &&
-		!strings.Contains(err.Error(), "duplicate column name") {
+	// 旧库迁移：先经 pragma_table_info 探测列是否存在再 ALTER——
+	// 不依赖驱动错误文案（modernc 升级或换驱动时文案可能变化，
+	// 文案判定失效会把真迁移失败静默吞掉）。
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('matches') WHERE name = 'task_type'`).Scan(&n); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("迁移 matches.task_type: %w", err)
+		return nil, fmt.Errorf("探测 matches.task_type: %w", err)
+	}
+	if n == 0 {
+		if _, err := db.Exec(`ALTER TABLE matches ADD COLUMN task_type TEXT NOT NULL DEFAULT 'general'`); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("迁移 matches.task_type: %w", err)
+		}
 	}
 	return &Store{db: db}, nil
 }

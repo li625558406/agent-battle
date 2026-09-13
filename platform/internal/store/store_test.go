@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -337,6 +338,69 @@ func TestMatchTaskType(t *testing.T) {
 	}
 }
 
+// TestMigrateLegacyMatchesWithoutTaskType 旧库（无 task_type 列）经 Open
+// 迁移后 TaskTypeOf 可用、CreateMatch 可落 task_type。
+func TestMigrateLegacyMatchesWithoutTaskType(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "legacy.db")
+	// 用不经过 Open 迁移逻辑的裸连接建 M1 时期的旧 schema
+	raw, err := sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := `
+CREATE TABLE IF NOT EXISTS agents (
+	id         INTEGER PRIMARY KEY AUTOINCREMENT,
+	name       TEXT UNIQUE NOT NULL,
+	token      TEXT UNIQUE NOT NULL,
+	rating     REAL NOT NULL DEFAULT 1200,
+	games      INTEGER NOT NULL DEFAULT 0,
+	wins       INTEGER NOT NULL DEFAULT 0,
+	losses     INTEGER NOT NULL DEFAULT 0,
+	ties       INTEGER NOT NULL DEFAULT 0,
+	created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS matches (
+	id         INTEGER PRIMARY KEY AUTOINCREMENT,
+	task_id    TEXT NOT NULL,
+	agent_a    INTEGER NOT NULL REFERENCES agents(id),
+	agent_b    INTEGER NOT NULL REFERENCES agents(id),
+	status     TEXT NOT NULL DEFAULT 'pending',
+	winner     TEXT NOT NULL DEFAULT '',
+	created_at INTEGER NOT NULL,
+	settled_at INTEGER
+);
+CREATE TABLE IF NOT EXISTS results (
+	match_id  INTEGER NOT NULL REFERENCES matches(id),
+	side      TEXT NOT NULL CHECK(side IN ('a','b')),
+	passed    INTEGER NOT NULL,
+	total     INTEGER NOT NULL,
+	wall_ms   INTEGER NOT NULL,
+	diff_hash TEXT NOT NULL DEFAULT '',
+	events_gz BLOB,
+	PRIMARY KEY (match_id, side)
+);`
+	if _, err := raw.Exec(legacy); err != nil {
+		t.Fatal(err)
+	}
+	raw.Close()
+
+	s, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open 应完成迁移而非报错: %v", err)
+	}
+	defer s.Close()
+	a, _ := s.CreateAgent("m1a")
+	b, _ := s.CreateAgent("m1b")
+	mid, err := s.CreateMatch("tk", "debug", a.ID, b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tt, _ := s.TaskTypeOf(mid); tt != "debug" {
+		t.Fatalf("迁移后 task_type 应可用, got %q", tt)
+	}
+}
+
 // TestProfileWindowAndBaseline 验证自身窗口（按 agent+task_type 过滤、仅
 // done、按结算时间倒序）与基线（该 task_type 全体 agent）的过滤语义。
 func TestProfileWindowAndBaseline(t *testing.T) {
@@ -368,15 +432,39 @@ func TestProfileWindowAndBaseline(t *testing.T) {
 	res(m3, "a", nil)
 	res(m3, "b", nil)
 
+	// 拨 m1 的 settled_at 到未来一小时：若实现错用 created_at/id 为主排序
+	//（m1 的 id 更小），own[0] 仍会是 m2，本断言即红——真正锁定
+	// "按结算时间倒序" 语义。同理由 id DESC 兜底同秒并列。
+	if _, err := s.db.Exec(`UPDATE matches SET settled_at = ? WHERE id = ?`,
+		time.Now().Add(time.Hour).Unix(), m1); err != nil {
+		t.Fatal(err)
+	}
+	// 孤儿对局（aborted）不得进入窗口与基线：m4 只写 a 侧保持 pending，
+	// 经负阈值清扫置为 aborted（此时它已有 a 侧 results 行，若过滤失效
+	// 会以 1 条混入 own 与 base，断言即红）。双侧都写会让 m4 直接结算为
+	// done，清扫便无从命中，aborted 过滤未被真正检验。
+	m4 := mk("debug", a1.ID, a2.ID)
+	res(m4, "a", nil)
+	if _, err := s.SweepStaleMatches(-time.Minute); err != nil { // 负阈值：清扫一切 pending
+		t.Fatal(err)
+	}
+	if _, err := s.AddResult(m4, "b", Result{Passed: 1, Total: 2}); err == nil {
+		t.Fatal("aborted 对局应拒绝上报（m4 未被清扫则本测试前提不成立）")
+	}
+
 	own, err := s.ProfileWindow(a1.ID, "debug", 50)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(own) != 2 {
-		t.Fatalf("a1 debug 窗口应 2 局（general 不计入）, got %d", len(own))
+		t.Fatalf("a1 debug 窗口应 2 局（general 与 aborted 不计入）, got %d", len(own))
 	}
-	if string(own[0].EventsGZ) != "gz2" {
-		t.Fatalf("窗口应按结算时间倒序（m2 在前）, got %q", own[0].EventsGZ)
+	// m1 双侧 events_gz 均为 nil、m2 的 a 侧为 "gz2"：settled_at 更新的 m1 应在前
+	if own[0].EventsGZ != nil {
+		t.Fatalf("settled_at 更新的 m1 应排在前: got %q", own[0].EventsGZ)
+	}
+	if string(own[1].EventsGZ) != "gz2" {
+		t.Fatalf("own[1] 应为 m2（events_gz=gz2）, got %q", own[1].EventsGZ)
 	}
 	base, err := s.ProfileBaseline("debug", 200)
 	if err != nil {
