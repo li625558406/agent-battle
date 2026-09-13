@@ -112,6 +112,69 @@ func TestMirrorPreflightRejectsBadManifest(t *testing.T) {
 	}
 }
 
+// TestMirrorReportHook 验证每轮结束后的 Report 回调：按轮次顺序触发，
+// 且能拿到双侧完整结果（判分报告 + 错误）。判分实际值：A 修复 → 1/1，
+// B 未修复 → 0/1（任务书示例的 2/2、1/2 与本仓库 fix-add 判分不符，按现状）。
+func TestMirrorReportHook(t *testing.T) {
+	taskDir := newTask(t)
+	var rounds []int
+	cfg := MirrorConfig{
+		TaskDir: taskDir, JudgeKey: []byte(DevJudgeKey), Rounds: 2, OutDir: t.TempDir(),
+		MakeA: func() adapter.Adapter { return adapter.Echo{FixContent: "add() { echo $(( $1 + $2 )); }\n"} },
+		MakeB: func() adapter.Adapter { return adapter.Echo{} },
+		Report: func(_ context.Context, r int, a, b Result, ea, eb error) error {
+			rounds = append(rounds, r)
+			if a.Report.Passed != 1 || a.Report.Total != 1 ||
+				b.Report.Passed != 0 || b.Report.Total != 1 || ea != nil || eb != nil {
+				t.Fatalf("round %d results wrong: %+v %+v ea=%v eb=%v", r, a.Report, b.Report, ea, eb)
+			}
+			if len(a.Events) == 0 || len(b.Events) == 0 {
+				t.Fatalf("round %d events missing: a=%d b=%d", r, len(a.Events), len(b.Events))
+			}
+			return nil
+		},
+	}
+	if _, err := Mirror(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 2 || rounds[0] != 1 || rounds[1] != 2 {
+		t.Fatalf("hook rounds: %v", rounds)
+	}
+}
+
+// TestMirrorReportHookAborts 对抗性用例：Report 返回 error 必须立即中止
+// 剩余轮次并把错误原样上抛（联网上报失败即停，不静默丢局），
+// 已完成局的部分汇总仍落盘。
+func TestMirrorReportHookAborts(t *testing.T) {
+	taskDir := newTask(t)
+	outDir := t.TempDir()
+	called := 0
+	hookErr := errors.New("上报失败: 模拟网络故障")
+	cfg := MirrorConfig{
+		TaskDir: taskDir, JudgeKey: []byte(DevJudgeKey), Rounds: 3, OutDir: outDir,
+		MakeA: func() adapter.Adapter { return adapter.Echo{FixContent: "add() { echo $(( $1 + $2 )); }\n"} },
+		MakeB: func() adapter.Adapter { return adapter.Echo{} },
+		Report: func(_ context.Context, _ int, _, _ Result, _, _ error) error {
+			called++
+			return hookErr
+		},
+	}
+	sum, err := Mirror(context.Background(), cfg)
+	if !errors.Is(err, hookErr) {
+		t.Fatalf("hook 错误应原样上抛, got %v", err)
+	}
+	if called != 1 {
+		t.Fatalf("第 1 轮上报失败后必须中止, hook 被调用了 %d 次", called)
+	}
+	if sum.RoundsPlayed() != 0 && len(sum.Details) != 1 {
+		t.Fatalf("中止时明细与统计应一致: %+v", sum)
+	}
+	files, _ := filepath.Glob(filepath.Join(outDir, "mirror-*.json"))
+	if len(files) == 0 {
+		t.Fatal("partial summary not persisted on report hook failure")
+	}
+}
+
 // TestMirrorSummaryShape 验证 RoundsPlayed 语义：已分胜负 + 平局之和。
 func TestMirrorSummaryShape(t *testing.T) {
 	s := Summary{WinsA: 1, WinsB: 2, Ties: 3}

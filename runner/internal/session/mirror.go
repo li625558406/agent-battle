@@ -26,6 +26,9 @@ type MirrorConfig struct {
 	EnvB     []string
 	MakeA    func() adapter.Adapter
 	MakeB    func() adapter.Adapter
+	// Report 每轮结束（双 Run 返回后、统计归类后）回调；返回 error 立即中止
+	// 并原样上抛（联网上报失败即停，不静默丢局）。nil = 纯本地模式。
+	Report func(ctx context.Context, round int, resA, resB Result, errA, errB error) error
 }
 
 // RoundDetail 单局明细。
@@ -142,6 +145,14 @@ func Mirror(ctx context.Context, cfg MirrorConfig) (Summary, error) {
 		d.PassB, d.TotalB = resB.Report.Passed, resB.Report.Total
 		d.WallA, d.WallB = resA.WallMS, resB.WallMS
 		sum.Details = append(sum.Details, d)
+
+		// 上报钩子在统计归类与明细落账之后触发：回调拿到的是已归一化的
+		// 本轮结果；错误经 abort 原样上抛并落盘部分汇总。
+		if cfg.Report != nil {
+			if rerr := cfg.Report(ctx, r, resA, resB, errA, errB); rerr != nil {
+				return abort(sum, cfg.OutDir, rerr)
+			}
+		}
 	}
 
 	if err := persistSummary(sum, cfg.OutDir); err != nil {
