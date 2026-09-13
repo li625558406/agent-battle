@@ -487,7 +487,9 @@ func TestProfile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if gotPath != "/api/agents/a/b/profile" { // url.PathEscape 只转义 query 语义，Path 段内 / 保留
+	if gotPath != "/api/agents/a/b/profile" { // url.PathEscape 会把 / 转义为 %2F（防路径段注入）；断言的是服务端
+		// 解码后的 r.URL.Path——Go 1.22 mux 的 {name} 通配符按转义段匹配，
+		// PathValue 解码回原始名，两端语义闭环。
 		t.Fatalf("路径错误: %s", gotPath)
 	}
 	if len(profs) != 1 || profs[0].TaskType != "general" || profs[0].SampleSize != 2 {

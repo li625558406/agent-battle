@@ -28,7 +28,7 @@ type profileDoc struct {
 // dimOrder 六维固定展示顺序。
 var dimOrder = []string{"correctness", "debugging", "tool_efficiency", "cost", "planning", "stability"}
 
-// cmdProfile 解析参数并打印画像。
+// cmdProfile 解析参数并调 runProfile 打印画像。
 func cmdProfile(args []string) error {
 	fs := newFlagSet("profile")
 	server := fs.String("server", "", "平台 API 根地址（必填）")
@@ -42,22 +42,27 @@ func cmdProfile(args []string) error {
 	if *name == "" {
 		return fmt.Errorf("--name 必填")
 	}
-	profs, err := client.New(*server).Profile(*name)
+	return runProfile(os.Stdout, *server, *name)
+}
+
+// runProfile 拉取画像并打印；空列表打印提示（非错误）。
+func runProfile(w io.Writer, server, name string) error {
+	profs, err := client.New(server).Profile(name)
 	if err != nil {
 		return err
 	}
 	for i, p := range profs {
 		var doc profileDoc
 		if err := json.Unmarshal([]byte(p.ProfileJSON), &doc); err != nil {
-			return fmt.Errorf("画像 %d JSON 解析失败: %w", i, err)
+			return fmt.Errorf("画像 %d（%s）JSON 解析失败: %w", i, p.TaskType, err)
 		}
 		if i > 0 {
-			fmt.Fprintln(os.Stdout)
+			fmt.Fprintln(w)
 		}
-		printProfile(os.Stdout, *name, p.TaskType, doc)
+		printProfile(w, name, p.TaskType, doc)
 	}
 	if len(profs) == 0 {
-		fmt.Fprintf(os.Stdout, "%s 暂无画像：完成对局后自动生成\n", *name)
+		fmt.Fprintf(w, "%s 暂无画像：完成对局后自动生成\n", name)
 	}
 	return nil
 }
