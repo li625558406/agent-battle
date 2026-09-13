@@ -25,12 +25,10 @@ import (
 // 进程内组装，全部通过 exec 真实二进制完成——CLI 输出格式（register 的
 // "token: " 行、mirror 的结算行、ladder 表格）本身即被测契约。
 //
-// 胜方无关断言说明：CLI mirror 的 --agent echo 给 A/B 双侧同一 Echo{}
-// 配置（FixContent 均为空），双侧判分同为 1/2，单局胜负由 WallMS 决定
-// （与既有 20 局冒烟 A11/B9 同一机制）。耗时同毫秒时判平——实测这是常态
-// 而非罕见事件，因此断言覆盖 a/b/tie 三种结局：无崩溃、平台按同一规则
-// （通过比例 → WallMS → 平局）完成 Elo 结算、天梯可见且统计四列与结算
-// 交叉一致；胜方从结算行解析后校验天梯。
+// 确定性说明：--fix-a 给 A 侧注入正确解法（判 2/2），B 侧空配置（判 0/2），
+// 通过比例决胜 → winner=a 恒定，与 WallMS 抖动无关。断言覆盖：无崩溃、
+// 定级赛结算分（1220/1180）、天梯可见且统计四列与结算交叉一致（防
+// runner 侧 winner 与平台侧 winnerOf 两套规则漂移）。
 func TestPlatformLoopEcho(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short 模式跳过黑盒 E2E")
@@ -109,6 +107,7 @@ func TestPlatformLoopEcho(t *testing.T) {
 		"--task", taskOut,
 		"--task-id", "fix-add",
 		"--agent", "echo",
+		"--fix-a", "add() { echo $(( $1 + $2 )); }",
 		"--rounds", "1",
 		"--name-a", "echoA", "--token-a", tokA,
 		"--name-b", "echoB", "--token-b", tokB,
@@ -122,35 +121,27 @@ func TestPlatformLoopEcho(t *testing.T) {
 		t.Fatalf("mirror 存在崩溃侧:\n%s", rep)
 	}
 
-	// 结算行：winner ∈ {a, b, tie}；定级赛 K=40 → 胜方 1220 / 负方 1180，
-	// 平局双方维持 1200
+	// 结算行：A 修复（2/2）、B 不修复（0/2）→ winner=a 确定性；
+	// 定级赛 K=40 → A 1220 / B 1180
 	settleRe := regexp.MustCompile(`第 1 轮 结算 winner=(\S+) A分=(\d+) B分=(\d+)`)
 	m := settleRe.FindStringSubmatch(rep)
 	if m == nil {
 		t.Fatalf("mirror 输出缺结算行:\n%s", rep)
 	}
 	winner, ratingA, ratingB := m[1], m[2], m[3]
-	winnerName, loserName := "echoA", "echoB"
-	var wantA, wantB, wantStatA, wantStatB string
-	switch winner {
-	case "a":
-		wantA, wantB = "1220", "1180"
-		wantStatA, wantStatB = "1 0 0", "0 1 0" // 胜 负 平
-		winnerName, loserName = "echoA", "echoB"
-	case "b":
-		wantA, wantB = "1180", "1220"
-		wantStatA, wantStatB = "0 1 0", "1 0 0"
-		winnerName, loserName = "echoB", "echoA"
-	case "tie":
-		wantA, wantB = "1200", "1200"
-		wantStatA, wantStatB = "0 0 1", "0 0 1"
-		winnerName, loserName = "echoA", "echoB"
-	default:
-		t.Fatalf("结算 winner 异常: %q\n%s", winner, rep)
+	const (
+		wantA      = "1220"
+		wantB      = "1180"
+		wantStatA  = "1 0 0" // 胜 负 平
+		wantStatB  = "0 1 0"
+		winnerName = "echoA"
+		loserName  = "echoB"
+	)
+	if winner != "a" {
+		t.Fatalf("注入 --fix-a 后 winner 应确定为 a，got %q\n%s", winner, rep)
 	}
 	if ratingA != wantA || ratingB != wantB {
-		t.Fatalf("定级赛结算分错误: winner=%s A分=%s B分=%s (期望 A分=%s B分=%s)\n%s",
-			winner, ratingA, ratingB, wantA, wantB, rep)
+		t.Fatalf("定级赛结算分错误: A分=%s B分=%s (期望 %s/%s)\n%s", ratingA, ratingB, wantA, wantB, rep)
 	}
 
 	// 天梯可见：双方在榜，且统计三列（胜 负 平）与结算交叉一致（局部视角
