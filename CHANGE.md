@@ -1,5 +1,20 @@
 # CHANGE.md — 项目迭代记录
 
+## 2026-09-13 · M1 计划 1 完成：真实 Claude Code 冒烟 + 20 局镜像对战验证（M1 runner-core）
+
+**主题**：Runner 核心闭环真实环境验证通过，M1 计划 1（runner-core）完成
+
+**核心变更**：
+- 本会话交付物全景：protocol（事件 NDJSON + HMAC 哈希链）、sandbox（临时 git 仓库沙箱）、adapter（echo / claude-code stream-json 接入）、collector（事件链追加写）、judge（判分包验签 + 超时 + DiffHash）、session（单局 + Mirror 镜像对战）、CLI（run/mirror/sign）、E2E 回归测试；历经基线 SHA 防 amend 架空、fail-fast 预检、judge 审查修复等多轮加固（见下方各条目）
+- 真实 claude-code 单局冒烟通过：`run --task ./examples/fix-add --agent claude-code --yolo` 判分 **2/2**，耗时 50.8s；事件流 7 条（tool_call×5 Read/Glob/Edit/Bash + file_edit + result），哈希链完整
+- 20 局镜像对战（同配置 A/B，仅 BATTLE_LABEL 差异，基线对照组）：**A 胜 11 | B 胜 9 | 平 0 | A崩 0 | B崩 0**，总耗时约 25 分钟；全部 40 局判分均 2/2 通过，胜负全部由 WallMS 耗时决胜（两侧通过数恒相同，符合"同配置应接近均分"的对照预期：11/9 偏差在二项分布噪声范围内）
+- 事件流全量抽验：40 个 events.ndjson 逐行 JSON 解析 0 坏行，每局均含 tool_call/file_edit/result 且行数 6-10
+
+**遗留事项**：
+- claude CLI 在 Windows 上依赖 `CLAUDE_CODE_GIT_BASH_PATH`（须为原生反斜杠路径，如 `F:\Git\bin\bash.exe`，正斜杠会被拒绝），本机未设该变量，需经 `--env`/`--env-a`/`--env-b` 显式注入——后续 Runner 分发文档须收录此项
+- 本任务难度下双方恒满分，耗时决胜使"平局率"观测失效；后续需引入难度更高/可部分得分的任务才能真正检验平局分支
+- 本机 claude CLI 单局耗时在 22-75s 间波动（同任务），耗时决胜在该噪声量级下区分度有限
+
 ## 2026-09-13 · 基线 SHA 注入防 amend 架空（M1 runner-core）
 
 **主题**：复审发现 `examples/fix-add` file-only-change 可被 `git commit --amend` 架空——agent 改 calc.sh 后 amend 根 commit，工作树干净 + `rev-list --count HEAD` 仍为 1，双测试全过且 DiffHash 与诚实零改动不可区分
