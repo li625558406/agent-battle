@@ -98,10 +98,10 @@ func syncOnceRemove(dir string) func() {
 const gitDefaultTimeout = 60 * time.Second
 
 // git 在 dir 中执行 git 子命令：
-// - 统一注入 -c core.autocrlf=false -c commit.gpgsign=false，保证 diff 字节级确定
-//   且不继承宿主全局配置；
-// - 过滤 GIT_DIR/GIT_WORK_TREE 环境变量，避免误指到宿主仓库；
-// - 带 60s 超时。
+//   - 统一注入 -c core.autocrlf=false -c commit.gpgsign=false，保证 diff 字节级确定
+//     且不继承宿主全局配置；
+//   - 过滤 GIT_DIR/GIT_WORK_TREE 环境变量，避免误指到宿主仓库；
+//   - 带 60s 超时。
 func git(dir string, args ...string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), gitDefaultTimeout)
 	defer cancel()
