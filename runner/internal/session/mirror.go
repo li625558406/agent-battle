@@ -162,6 +162,8 @@ func abort(sum Summary, outDir string, cause error) (Summary, error) {
 // winner 决出单局胜者：
 // 双方均 0 通过 → 平局（失败的耗时没有竞速意义）；
 // 通过比例高者胜 → 同分比 WallMS 短者胜 → 再同分平局。
+// 注意：本规则在平台侧 platform/internal/store（winnerOf）各有一份
+//（跨 internal 边界不可导入），规则变更必须双侧同步。
 func winner(a, b Result) string {
 	if a.Report.Passed == 0 && b.Report.Passed == 0 {
 		return "tie"
