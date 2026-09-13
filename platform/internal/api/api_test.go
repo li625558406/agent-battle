@@ -12,11 +12,12 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"agentbattle/platform/internal/store"
 )
 
-func newServer(t *testing.T) *httptest.Server {
+func newServerWithStore(t *testing.T) (*httptest.Server, *store.Store) {
 	t.Helper()
 	st, err := store.Open(filepath.Join(t.TempDir(), "api.db"))
 	if err != nil {
@@ -42,9 +43,13 @@ func newServer(t *testing.T) *httptest.Server {
 	if err := os.WriteFile(filepath.Join(tasksDir, "demo", "tests", "sig"), []byte("sig"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-
 	srv := httptest.NewServer(New(st, tasksDir, []byte("dev-secret")))
 	t.Cleanup(srv.Close)
+	return srv, st
+}
+
+func newServer(t *testing.T) *httptest.Server {
+	srv, _ := newServerWithStore(t)
 	return srv
 }
 
@@ -314,6 +319,33 @@ func TestMatchFlow(t *testing.T) {
 	}
 	if _, has := m["token"]; has {
 		t.Fatal("天梯响应顶层包含 token 字段")
+	}
+}
+
+// TestResultRejectedAfterSweep 验证 API 层拒绝对 aborted 对局上报（409 固定文案）。
+func TestResultRejectedAfterSweep(t *testing.T) {
+	srv, st := newServerWithStore(t)
+	tokA := register(t, srv, "A")
+	register(t, srv, "B") // B 需存在才能创建对局；其 token 在本用例中不使用
+	resp, m := do(t, "POST", srv.URL+"/api/matches", tokA,
+		map[string]any{"task_id": "demo", "agent_a": "A", "agent_b": "B"})
+	if resp.StatusCode != 201 {
+		t.Fatalf("创建对局状态码 = %d, 期望 201", resp.StatusCode)
+	}
+	matchID := strconv.FormatInt(int64(m["match_id"].(float64)), 10)
+
+	// 负阈值：cutoff 在未来，全部 pending 命中 → 该对局被置为 aborted
+	if _, err := st.SweepStaleMatches(-time.Minute); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, m = do(t, "POST", srv.URL+"/api/matches/"+matchID+"/results", tokA,
+		map[string]any{"side": "a", "passed": 1, "total": 1, "wall_ms": 100})
+	if resp.StatusCode != 409 {
+		t.Fatalf("aborted 对局上报状态码 = %d, 期望 409", resp.StatusCode)
+	}
+	if s, _ := m["error"].(string); s != "对局已结束，拒绝上报" {
+		t.Fatalf("aborted 上报错误文案 = %q, 期望固定文案", s)
 	}
 }
 

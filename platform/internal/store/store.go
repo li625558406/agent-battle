@@ -158,13 +158,18 @@ type Result struct {
 
 // AddResult 记录一侧结果；双侧到齐时结算 Elo 并更新统计。
 // 返回该次写入后对局是否已结算。
-// 注：本侧写入用 results 的 (match_id, side) 主键天然拒绝同侧重复提交；
-// 不存在的 matchID 会被外键约束拒绝（Open 已开启 foreign_keys）。
-// 双侧几乎同时到齐的结算竞态在 M1 不处理（平台单进程、上报串行处理），
-// 引入并发上报时需改为事务内条件更新做幂等保护。
+// 仅 pending 状态的对局接受上报：aborted（超时清理）与 done（已结算）
+// 一律拒绝——孤儿复活或已结算对局被补写都会污染战绩。
+// 同侧重复提交被 results 的 (match_id, side) 主键拒绝；不存在的 matchID
+// 被外键约束拒绝（Open 已开启 foreign_keys）。
 func (s *Store) AddResult(matchID int64, side string, r Result) (bool, error) {
 	if side != "a" && side != "b" {
 		return false, fmt.Errorf("非法 side: %q", side)
+	}
+	if _, _, _, status, _, err := s.MatchByID(matchID); err != nil {
+		return false, fmt.Errorf("读对局 %d: %w", matchID, err)
+	} else if status != "pending" {
+		return false, fmt.Errorf("对局 %d 已结束（%s），拒绝上报", matchID, status)
 	}
 	if _, err := s.db.Exec(
 		`INSERT INTO results (match_id, side, passed, total, wall_ms, diff_hash, events_gz)
@@ -295,6 +300,21 @@ func (s *Store) settle(matchID int64) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+// SweepStaleMatches 孤儿对局清理：把 pending 且 created_at 早于
+// now-olderThan 的对局置为 aborted（mirror 中止会在平台侧遗留永远 waiting
+// 的半场对局）。aborted 不参与 Elo、拒绝后续上报（AddResult 守卫）。
+// 返回被清理的对局数。olderThan 为负时 cutoff 在未来，全部 pending 命中
+//（测试便利，语义即"清扫一切未结算"）。
+func (s *Store) SweepStaleMatches(olderThan time.Duration) (int64, error) {
+	cutoff := time.Now().Add(-olderThan).Unix()
+	res, err := s.db.Exec(
+		`UPDATE matches SET status = 'aborted' WHERE status = 'pending' AND created_at <= ?`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // winnerOf：通过比例高者胜 → 同比例 wall 短者胜 → 平局。双零直接平局

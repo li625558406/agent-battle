@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"agentbattle/platform/internal/api"
 	"agentbattle/platform/internal/store"
@@ -18,6 +19,7 @@ func main() {
 	tasksDir := flag.String("tasks", "./examples", "任务目录根")
 	storePath := flag.String("store", "agentbattle.db", "SQLite 库文件路径")
 	judgeKey := flag.String("judge-key", "dev-secret", "裁判密钥（下发给对局双方用于 judge 验签）")
+	matchTimeout := flag.Duration("match-timeout", 30*time.Minute, "pending 对局超时清理阈值（0 禁用清理）")
 	flag.Parse()
 
 	st, err := store.Open(*storePath)
@@ -25,6 +27,21 @@ func main() {
 		log.Fatalf("打开存储 %s 失败: %v", *storePath, err)
 	}
 	defer st.Close()
+
+	// 孤儿对局清理：mirror 中止会在平台侧遗留永远 waiting 的半场对局；
+	// 周期扫描把超时 pending 对局置为 aborted（不参与 Elo、拒绝后续上报）
+	if *matchTimeout > 0 {
+		go func() {
+			for range time.Tick(time.Minute) {
+				n, err := st.SweepStaleMatches(*matchTimeout)
+				if err != nil {
+					log.Printf("孤儿对局清理失败: %v", err)
+				} else if n > 0 {
+					log.Printf("已清理 %d 场超时未结算对局", n)
+				}
+			}
+		}()
+	}
 
 	// 任务目录缺失只警告不退出：注册/天梯仍可用，仅创建对局与 bundle 不可用
 	if fi, err := os.Stat(*tasksDir); err != nil || !fi.IsDir() {

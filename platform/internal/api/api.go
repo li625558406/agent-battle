@@ -164,7 +164,7 @@ func (s *Server) handleResult(w http.ResponseWriter, r *http.Request, ag store.A
 		writeErr(w, http.StatusBadRequest, "match id 非法")
 		return
 	}
-	_, aID, bID, _, _, err := s.St.MatchByID(matchID)
+	_, aID, bID, status, _, err := s.St.MatchByID(matchID)
 	if err != nil {
 		writeErr(w, http.StatusNotFound, "对局不存在")
 		return
@@ -172,6 +172,12 @@ func (s *Server) handleResult(w http.ResponseWriter, r *http.Request, ag store.A
 	// 上报方必须是对局双方之一
 	if ag.ID != aID && ag.ID != bID {
 		writeErr(w, http.StatusForbidden, "当前 token 不属于该对局双方")
+		return
+	}
+	// 已结束（done 已结算 / aborted 超时清理）的对局拒绝上报：
+	// 防结算后改写与孤儿复活（对抗性：重复触发/状态耦合）
+	if status != "pending" {
+		writeErr(w, http.StatusConflict, "对局已结束，拒绝上报")
 		return
 	}
 	var body struct {

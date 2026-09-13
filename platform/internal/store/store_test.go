@@ -222,6 +222,45 @@ func TestSettleConcurrentReports(t *testing.T) {
 	}
 }
 
+// TestSweepStaleMatches 验证孤儿对局清理：超时 pending → aborted，
+// aborted 拒绝上报，未超时对局不受影响，二次清扫幂等。
+func TestSweepStaleMatches(t *testing.T) {
+	s := openTest(t)
+	a, _ := s.CreateAgent("A")
+	b, _ := s.CreateAgent("B")
+	old1, _ := s.CreateMatch("fix-add", a.ID, b.ID)
+	old2, _ := s.CreateMatch("fix-add", a.ID, b.ID)
+	fresh, _ := s.CreateMatch("fix-add", a.ID, b.ID)
+
+	// old1/old2 的 created_at 拨回 2 小时前（模拟 mirror 中止遗留的孤儿）
+	past := time.Now().Add(-2 * time.Hour).Unix()
+	if _, err := s.db.Exec(`UPDATE matches SET created_at = ? WHERE id IN (?, ?)`, past, old1, old2); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := s.SweepStaleMatches(30 * time.Minute)
+	if err != nil || n != 2 {
+		t.Fatalf("应清理 2 场, got n=%d err=%v", n, err)
+	}
+	// 二次清扫：幂等
+	if n, err := s.SweepStaleMatches(30 * time.Minute); err != nil || n != 0 {
+		t.Fatalf("二次清理应幂等, got n=%d err=%v", n, err)
+	}
+
+	// aborted 对局拒绝上报
+	if _, err := s.AddResult(old1, "a", Result{Passed: 1, Total: 1, WallMS: 10}); err == nil {
+		t.Fatal("aborted 对局应拒绝上报")
+	}
+	// 未超时的 fresh 对局不受影响：双侧到齐正常结算
+	if _, err := s.AddResult(fresh, "a", Result{Passed: 2, Total: 2, WallMS: 100}); err != nil {
+		t.Fatal(err)
+	}
+	done, err := s.AddResult(fresh, "b", Result{Passed: 1, Total: 2, WallMS: 50})
+	if err != nil || !done {
+		t.Fatalf("fresh 对局应正常结算: done=%v err=%v", done, err)
+	}
+}
+
 // TestSettleParallelMatches 对抗性：多场对局结算真并行（两个 goroutine 各自
 // 补上不同 match 的 b 侧，触发多场 settle 同时进行）。settle 的"读 agents →
 // 算 → 写 agents"若非原子，并发结算会互相覆盖（丢失更新）：N 场并行结算后
