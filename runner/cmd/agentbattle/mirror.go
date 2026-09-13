@@ -90,11 +90,12 @@ func cmdMirror(args []string) error {
 	fmt.Printf("镜像对战完成: A 胜 %d | B 胜 %d | 平 %d | A崩 %d | B崩 %d\n",
 		sum.WinsA, sum.WinsB, sum.Ties, sum.AErrors, sum.BErrors)
 	fmt.Printf("明细: %s\n", outDir)
-	// 联网模式：全部轮次结束后拉取天梯前 5 名展示结算成果
+	// 联网模式：全部轮次结束后拉取天梯前 5 名展示结算成果。
+	// 拉取失败只警告不改退出码——此时全部轮次上报已成功、Elo 已入账。
 	if cl != nil {
 		fmt.Println("天梯前 5:")
 		if err := runLadder(os.Stdout, *server, 5); err != nil {
-			return fmt.Errorf("拉取天梯失败: %w", err)
+			fmt.Fprintf(os.Stderr, "警告: 拉取天梯失败（结算不受影响）: %v\n", err)
 		}
 	}
 	return nil
