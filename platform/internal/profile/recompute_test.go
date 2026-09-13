@@ -180,6 +180,19 @@ func TestDecodeEventsDegenerate(t *testing.T) {
 	if got := decodeEvents(buf.Bytes()); got != nil {
 		t.Fatalf("流内畸形 JSON 应整流返回 nil: %+v", got)
 	}
+
+	// f) gzip 炸弹：小压缩包解出超限字节数 → 整流降级返回 nil
+	var bomb bytes.Buffer
+	gw = gzip.NewWriter(&bomb)
+	if _, err := gw.Write(bytes.Repeat([]byte{0}, maxEventBytes+1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := decodeEvents(bomb.Bytes()); got != nil {
+		t.Fatalf("超限事件流应整流降级: %d events", len(got))
+	}
 }
 
 // TestRecomputeNoMatches 无任何对局时不落画像（空窗口不产生垃圾行）。

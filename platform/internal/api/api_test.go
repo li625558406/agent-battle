@@ -490,8 +490,7 @@ func TestProfileFlow(t *testing.T) {
 	if resp, _ = do(t, "GET", srv.URL+"/api/agents/ghost/profile", "", nil); resp.StatusCode != 404 {
 		t.Fatalf("未知 agent 应 404, got %d", resp.StatusCode)
 	}
-	tokC := register(t, srv, "pc")
-	_ = tokC
+	register(t, srv, "pc")
 	resp, _ = do(t, "GET", srv.URL+"/api/agents/pc/profile", "", nil)
 	if resp.StatusCode != 200 {
 		t.Fatalf("无对局 agent 应 200, got %d", resp.StatusCode)
@@ -525,5 +524,52 @@ func TestProfileKnownDifferenceAPI(t *testing.T) {
 	sa, sb := get("ka"), get("kb")
 	if sa <= sb {
 		t.Fatalf("画像应复现已知差异: A=%v B=%v", sa, sb)
+	}
+}
+
+// TestReadTaskType 归一化分支全覆盖：读失败/畸形 JSON/类型不符/空白 → general。
+func TestReadTaskType(t *testing.T) {
+	dir := t.TempDir()
+	write := func(taskID, content string) {
+		t.Helper()
+		d := filepath.Join(dir, taskID)
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(d, "task.json"), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// 目录不存在
+	if got := readTaskType(dir, "ghost"); got != "general" {
+		t.Fatalf("目录不存在应归一 general, got %q", got)
+	}
+	// 畸形 JSON
+	write("broken", "{not json")
+	if got := readTaskType(dir, "broken"); got != "general" {
+		t.Fatalf("畸形 JSON 应归一 general, got %q", got)
+	}
+	// task_type 类型不符
+	write("wrongtype", `{"task_type": 123}`)
+	if got := readTaskType(dir, "wrongtype"); got != "general" {
+		t.Fatalf("类型不符应归一 general, got %q", got)
+	}
+	// 空值与纯空白
+	write("empty", `{"task_type": ""}`)
+	write("blank", `{"task_type": "   "}`)
+	for _, id := range []string{"empty", "blank"} {
+		if got := readTaskType(dir, id); got != "general" {
+			t.Fatalf("%s 空白应归一 general, got %q", id, got)
+		}
+	}
+	// 正常读取（含两侧空白裁剪）
+	write("real", `{"task_type": "debug"}`)
+	if got := readTaskType(dir, "real"); got != "debug" {
+		t.Fatalf("正常读取失败: %q", got)
+	}
+	write("padded", `{"task_type": "  spaced  "}`)
+	if got := readTaskType(dir, "padded"); got != "spaced" {
+		t.Fatalf("空白裁剪失败: %q", got)
 	}
 }

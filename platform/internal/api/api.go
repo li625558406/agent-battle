@@ -237,7 +237,6 @@ func (s *Server) handleResult(w http.ResponseWriter, r *http.Request, ag store.A
 	}
 	// 已结算：回读 winner 与双方最新 rating
 	_, _, _, _, winner, err := s.St.MatchByID(matchID)
-
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "结算后回读对局失败")
 		return

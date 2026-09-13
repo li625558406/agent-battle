@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -55,10 +56,36 @@ func Recompute(st *store.Store, agentID int64, taskType string) error {
 	return st.UpsertProfile(agentID, taskType, p.SampleSize, string(b))
 }
 
+// maxEventBytes 单局事件流解压后的字节上限（gzip 炸弹防御：超限整流降级，
+// 该局按无事件流参与画像）。
+const maxEventBytes = 16 << 20 // 16MB
+
+// errDecompressLimit 事件流解压超限时由 limitErrReader 返回。
+var errDecompressLimit = errors.New("profile: 事件流解压超限")
+
+// limitErrReader 超限时返回非 EOF 错误（LimitReader 截断会伪装成 EOF，
+// 导致误返回部分事件，必须区分）。
+type limitErrReader struct {
+	r         io.Reader
+	remaining int64
+}
+
+func (l *limitErrReader) Read(p []byte) (int, error) {
+	if l.remaining <= 0 {
+		return 0, errDecompressLimit
+	}
+	if int64(len(p)) > l.remaining {
+		p = p[:l.remaining]
+	}
+	n, err := l.r.Read(p)
+	l.remaining -= int64(n)
+	return n, err
+}
+
 // decodeEvents 解压 NDJSON 事件流；正常读到 EOF 时返回累积的事件，任何其他
-// 失败（空输入、坏 gzip 头、中段截断/坏 CRC/畸形 JSON 等）整流丢弃返回 nil
-//（该局降级为无事件流，由 ExtractMetrics/BuildProfile 的缺席规则处理，
-// 不阻断整场画像；也绝不把残缺数据带进画像）。
+// 失败（空输入、坏 gzip 头、中段截断/坏 CRC/畸形 JSON、解压超 maxEventBytes
+// 等）整流丢弃返回 nil（该局降级为无事件流，由 ExtractMetrics/BuildProfile
+// 的缺席规则处理，不阻断整场画像；也绝不把残缺数据带进画像）。
 func decodeEvents(gz []byte) []protocol.Event {
 	if len(gz) == 0 {
 		return nil
@@ -69,7 +96,7 @@ func decodeEvents(gz []byte) []protocol.Event {
 	}
 	defer zr.Close()
 	var events []protocol.Event
-	dec := json.NewDecoder(zr)
+	dec := json.NewDecoder(&limitErrReader{r: zr, remaining: maxEventBytes})
 	for {
 		var e protocol.Event
 		err := dec.Decode(&e)
