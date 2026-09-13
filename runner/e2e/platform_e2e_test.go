@@ -25,10 +25,12 @@ import (
 // 进程内组装，全部通过 exec 真实二进制完成——CLI 输出格式（register 的
 // "token: " 行、mirror 的结算行、ladder 表格）本身即被测契约。
 //
-// 确定性说明：--fix-a 给 A 侧注入正确解法（判 2/2），B 侧空配置（判 0/2），
+// 确定性说明：--fix-a 给 A 侧注入正确解法（判 2/2），B 侧空配置
+//（file-only-change 判分对未改动工作区 vacuously 通过，判 1/2），
 // 通过比例决胜 → winner=a 恒定，与 WallMS 抖动无关。断言覆盖：无崩溃、
-// 定级赛结算分（1220/1180）、天梯可见且统计四列与结算交叉一致（防
-// runner 侧 winner 与平台侧 winnerOf 两套规则漂移）。
+// 本地汇总行胜负平（runner 侧 session.winner 判 a 胜）、定级赛结算分
+//（1220/1180）、天梯可见且统计四列与结算交叉一致——本地与平台两侧
+// winner 断言合起来防 runner 侧 winner 与平台侧 winnerOf 两套规则漂移。
 func TestPlatformLoopEcho(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short 模式跳过黑盒 E2E")
@@ -101,7 +103,9 @@ func TestPlatformLoopEcho(t *testing.T) {
 	}
 
 	// mirror --server 1 轮：任务包源自 server（tests/sig 用默认 dev-secret
-	// 签名），judge 预检（VerifyDir）应通过
+	// 签名），judge 预检（VerifyDir）应通过。
+	// --fix-a 的解法串与 examples/fix-add 判分命令强耦合（calc.sh 的 add()
+	// 需输出两数之和）；任务判分口径变更时此处必须同步修改。
 	rep := run("mirror",
 		"--server", "http://"+addr,
 		"--task", taskOut,
@@ -113,12 +117,17 @@ func TestPlatformLoopEcho(t *testing.T) {
 		"--name-b", "echoB", "--token-b", tokB,
 		"--out", filepath.Join(t.TempDir(), "reports"))
 
-	// 汇总行：无任何一侧崩溃
+	// 汇总行：无任何一侧崩溃；本地胜负平与预期一致——该行由 runner 侧
+	// session.winner 判定（与平台侧 winnerOf 是两套独立实现），此处断言
+	// 与下方结算/天梯断言合起来防两套 winner 规则漂移
 	if !strings.Contains(rep, "镜像对战完成") {
 		t.Fatalf("mirror 输出缺汇总行:\n%s", rep)
 	}
 	if !strings.Contains(rep, "A崩 0 | B崩 0") {
 		t.Fatalf("mirror 存在崩溃侧:\n%s", rep)
+	}
+	if !strings.Contains(rep, "A 胜 1 | B 胜 0 | 平 0") {
+		t.Fatalf("本地汇总行胜负平不符（runner 侧 winner 应判 a 胜）:\n%s", rep)
 	}
 
 	// 结算行：A 修复（2/2）、B 不修复（0/2）→ winner=a 确定性；
