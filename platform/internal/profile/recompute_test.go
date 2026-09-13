@@ -127,6 +127,31 @@ func TestRecomputeIdempotentAndIsolated(t *testing.T) {
 	}
 }
 
+// TestDecodeEventsDegenerate 覆盖 decodeEvents 的降级契约：正常 EOF 返回
+// 事件；空输入/坏 gzip 头/中段截断一律整流丢弃返回 nil，不喂残缺数据进画像。
+func TestDecodeEventsDegenerate(t *testing.T) {
+	good := gzEvents(t, []protocol.Event{{Type: protocol.EventToolCall, Tokens: 5}})
+
+	// a) 正常流往返
+	evs := decodeEvents(good)
+	if len(evs) != 1 || evs[0].Type != protocol.EventToolCall {
+		t.Fatalf("正常流应解出 1 条 ToolCall 事件: %+v", evs)
+	}
+
+	// b) 空输入与坏 gzip 头
+	if got := decodeEvents(nil); got != nil {
+		t.Fatalf("空输入应返回 nil: %+v", got)
+	}
+	if got := decodeEvents([]byte{0x00}); got != nil {
+		t.Fatalf("坏 gzip 头应返回 nil: %+v", got)
+	}
+
+	// c) 中段截断（合法 gz 砍掉后半段）：必须整流降级返回 nil
+	if got := decodeEvents(good[:len(good)/2]); got != nil {
+		t.Fatalf("中段截断应整流返回 nil，不应带残缺数据: %+v", got)
+	}
+}
+
 // TestRecomputeNoMatches 无任何对局时不落画像（空窗口不产生垃圾行）。
 func TestRecomputeNoMatches(t *testing.T) {
 	s := newStore(t)

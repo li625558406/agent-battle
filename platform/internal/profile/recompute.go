@@ -8,6 +8,7 @@ import (
 	"compress/gzip"
 	"encoding/json"
 	"fmt"
+	"io"
 	"time"
 
 	"agentbattle/platform/internal/store"
@@ -54,8 +55,10 @@ func Recompute(st *store.Store, agentID int64, taskType string) error {
 	return st.UpsertProfile(agentID, taskType, p.SampleSize, string(b))
 }
 
-// decodeEvents 解压 NDJSON 事件流；任何失败返回 nil（该局降级为无事件流，
-// 由 ExtractMetrics/BuildProfile 的缺席规则处理，不阻断整场画像）。
+// decodeEvents 解压 NDJSON 事件流；正常读到 EOF 时返回累积的事件，任何其他
+// 失败（空输入、坏 gzip 头、中段截断/坏 CRC/畸形 JSON 等）整流丢弃返回 nil
+//（该局降级为无事件流，由 ExtractMetrics/BuildProfile 的缺席规则处理，
+// 不阻断整场画像；也绝不把残缺数据带进画像）。
 func decodeEvents(gz []byte) []protocol.Event {
 	if len(gz) == 0 {
 		return nil
@@ -69,8 +72,12 @@ func decodeEvents(gz []byte) []protocol.Event {
 	dec := json.NewDecoder(zr)
 	for {
 		var e protocol.Event
-		if err := dec.Decode(&e); err != nil {
+		err := dec.Decode(&e)
+		if err == io.EOF {
 			break
+		}
+		if err != nil {
+			return nil // 中段损坏：整局降级为无事件流，不带残缺数据进画像
 		}
 		events = append(events, e)
 	}
