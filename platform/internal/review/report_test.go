@@ -146,12 +146,37 @@ func TestBuildReportAdversarial(t *testing.T) {
 	if rep.Compare.Tokens.A != 4 {
 		t.Fatalf("负 tokens 不应计入: %+v", rep.Compare)
 	}
-	// 任何 compare 值不得为 NaN
-	out, _ := json.Marshal(rep.Compare)
-	if bytes.Contains(out, []byte("NaN")) {
-		t.Fatalf("compare 不得含 NaN: %s", out)
+	// 任何 compare 值不得为 NaN（json.Marshal 遇 NaN 报错，以此钉住）
+	if _, err := json.Marshal(rep.Compare); err != nil {
+		t.Fatalf("compare 序列化失败（含 NaN?）: %v", err)
 	}
 	if math.IsNaN(rep.Compare.PassRatio.A) || math.IsNaN(rep.Compare.PassRatio.B) {
 		t.Fatal("pass_ratio 不得为 NaN")
+	}
+	// file_edit 的 Note 为空：Path 应被 omitempty 省略（不出现空串键）
+	rep = BuildReport(meta,
+		SideInput{Agent: "a", Passed: 1, Total: 1,
+			EventsGZ: gz(t, protocol.Event{Seq: 1, Type: protocol.EventFileEdit})},
+		SideInput{Agent: "b", Passed: 1, Total: 1})
+	if ta := rep.Timeline["a"]; len(ta) != 1 || ta[0].Path != "" {
+		t.Fatalf("空 Note 的 file_edit Path 应为空: %+v", ta)
+	}
+	if out, err := json.Marshal(rep); err != nil || bytes.Contains(out, []byte(`"path":""`)) {
+		t.Fatalf("空 path 应被 omitempty 省略: err=%v out=%s", err, out)
+	}
+	// 乱序/重复 Seq：时间线按流序镜像（不做排序/去重），钉住该语义
+	rep = BuildReport(meta,
+		SideInput{Agent: "a", Passed: 1, Total: 1,
+			EventsGZ: gz(t,
+				protocol.Event{Seq: 5, Type: protocol.EventToolCall, Tool: "bash"},
+				protocol.Event{Seq: 2, Type: protocol.EventToolCall, Tool: "bash"},
+				protocol.Event{Seq: 5, Type: protocol.EventError})},
+		SideInput{Agent: "b", Passed: 1, Total: 1})
+	ta := rep.Timeline["a"]
+	if len(ta) != 3 || ta[0].Seq != 5 || ta[1].Seq != 2 || ta[2].Seq != 5 {
+		t.Fatalf("时间线应按流序镜像不排序不去重: %+v", ta)
+	}
+	if mk := rep.Marks["a"]; len(mk) != 1 || mk[0].Seq != 5 {
+		t.Fatalf("乱序流中首个 error 的 seq 应为 5: %+v", mk)
 	}
 }

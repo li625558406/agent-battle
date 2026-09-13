@@ -125,7 +125,9 @@ func buildSide(in SideInput) (SideMeta, []TlEvent, []Mark, sideStats) {
 		if e.Tokens > 0 {
 			te.Tokens = e.Tokens
 		}
-		te.DurationMS = e.DurationMS
+		if e.DurationMS > 0 {
+			te.DurationMS = e.DurationMS
+		}
 		tl = append(tl, te)
 		if e.Type == protocol.EventError {
 			st.errors++
