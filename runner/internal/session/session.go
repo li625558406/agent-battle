@@ -66,6 +66,14 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 	}
 	defer cleanupSb()
 
+	// 在 agent 启动前记录基线 HEAD SHA：这是执行环境自己记得、agent 无法
+	// 伪造的值，判分命令据此校验提交历史未被改写（防 commit --amend 架空
+	// 工作树 diff 校验）。失败即终止本局——没有可信基线，判分不可信。
+	baselineSHA, err := sandbox.HeadRev(sb)
+	if err != nil {
+		return Result{}, fmt.Errorf("记录基线 HEAD 失败: %w", err)
+	}
+
 	col := collector.New()
 	events := make(chan adapter.RawEvent, 256)
 	execDone := make(chan error, 1)
@@ -147,7 +155,7 @@ agentLoop:
 	}
 	wall := time.Since(start).Milliseconds()
 
-	rep, err := judge.Run(cfg.TaskDir, sb, cfg.JudgeKey)
+	rep, err := judge.Run(cfg.TaskDir, sb, baselineSHA, cfg.JudgeKey)
 	if err != nil {
 		return Result{}, fmt.Errorf("判分失败: %w", err)
 	}

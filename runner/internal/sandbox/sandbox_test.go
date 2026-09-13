@@ -97,6 +97,33 @@ func TestCreateSurvivesLowercaseGitEnv(t *testing.T) {
 	}
 }
 
+// HeadRev：真 git 仓库返回 40 位完整 SHA；非 git 目录返回 error。
+func TestHeadRev(t *testing.T) {
+	seed := t.TempDir()
+	write(t, seed, "a.txt", "hi")
+	sb, cleanup, err := Create(seed)
+	defer cleanup()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sha, err := HeadRev(sb)
+	if err != nil {
+		t.Fatalf("HeadRev on fresh sandbox: %v", err)
+	}
+	if len(sha) != 40 {
+		t.Fatalf("want 40-char SHA, got %q (len %d)", sha, len(sha))
+	}
+	for _, c := range sha {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			t.Fatalf("SHA contains non-hex char: %q", sha)
+		}
+	}
+
+	if _, err := HeadRev(t.TempDir()); err == nil {
+		t.Fatal("HeadRev on non-git dir must fail")
+	}
+}
+
 // C2：并发调用 cleanup 不得有数据竞争（-race 验证），且目录只删一次。
 func TestCleanupConcurrent(t *testing.T) {
 	seed := t.TempDir()

@@ -81,6 +81,18 @@ func gitRun(t *testing.T, dir string, args ...string) {
 	}
 }
 
+// gitRev 返回 dir 仓库的 HEAD SHA（供 Run 的 baselineSHA 参数使用）。
+func gitRev(t *testing.T, dir string) string {
+	t.Helper()
+	cmd := exec.Command("git", "rev-parse", "HEAD")
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git rev-parse HEAD: %v: %s", err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
 func TestRunVerifiesAndScores(t *testing.T) {
 	taskDir, sb := setupTask(t)
 	// 基线 commit 之后真实改动 work.txt，DiffHash 必须反映真实 diff，
@@ -88,7 +100,7 @@ func TestRunVerifiesAndScores(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(sb, "work.txt"), []byte("x\nchanged by agent"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	rep, err := Run(taskDir, sb, []byte(devKey))
+	rep, err := Run(taskDir, sb, gitRev(t, sb), []byte(devKey))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,10 +120,11 @@ func TestRunVerifiesAndScores(t *testing.T) {
 // 必须让 Run 失败，而不是静默产出 sha256("") 冒充"无改动"。
 func TestRunFailsWhenSandboxNotGitRepo(t *testing.T) {
 	taskDir, sb := setupTask(t)
+	baseline := gitRev(t, sb) // 先记录基线，再模拟 agent 删掉 .git
 	if err := os.RemoveAll(filepath.Join(sb, ".git")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Run(taskDir, sb, []byte(devKey)); err == nil {
+	if _, err := Run(taskDir, sb, baseline, []byte(devKey)); err == nil {
 		t.Fatal("non-git sandbox must fail Run, not produce fake empty diff hash")
 	}
 }
@@ -124,7 +137,7 @@ func TestRunCommandTimeout(t *testing.T) {
 	testTimeout = 100 * time.Millisecond
 	defer func() { testTimeout = old }()
 
-	rep, err := Run(taskDir, sb, []byte(devKey))
+	rep, err := Run(taskDir, sb, gitRev(t, sb), []byte(devKey))
 	if err != nil {
 		t.Fatalf("timeout in one test must not fail Run: %v", err)
 	}
@@ -154,15 +167,81 @@ func TestTamperedManifestRejected(t *testing.T) {
 	if err := os.WriteFile(mp, []byte(`{"task_id":"t1","tests":[{"name":"evil","cmd":"echo pwned"}]}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Run(taskDir, sb, []byte(devKey)); err == nil {
+	if _, err := Run(taskDir, sb, gitRev(t, sb), []byte(devKey)); err == nil {
 		t.Fatal("tampered judge package accepted")
 	}
 }
 
 func TestWrongKeyRejected(t *testing.T) {
 	taskDir, sb := setupTask(t)
-	if _, err := Run(taskDir, sb, []byte("wrong-key")); err == nil {
+	if _, err := Run(taskDir, sb, gitRev(t, sb), []byte("wrong-key")); err == nil {
 		t.Fatal("wrong key accepted")
+	}
+}
+
+// baselineCmd 模拟 manifest 的基线校验命令：HEAD 必须等于注入的基线 SHA。
+const baselineCmd = `[ "$(git rev-parse HEAD)" = "$AGENTBATTLE_BASELINE_SHA" ]`
+
+// 基线 SHA 注入：诚实沙箱（历史未动）下，HEAD == AGENTBATTLE_BASELINE_SHA，
+// 校验命令必须通过。
+func TestRunInjectsBaselineSHA(t *testing.T) {
+	taskDir, sb := setupTask(t, protocol.TestCommand{Name: "baseline-check", Cmd: baselineCmd})
+	baseline := gitRev(t, sb)
+	rep, err := Run(taskDir, sb, baseline, []byte(devKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var check *protocol.TestResult
+	for i := range rep.Results {
+		if rep.Results[i].Name == "baseline-check" {
+			check = &rep.Results[i]
+		}
+	}
+	if check == nil || !check.Passed {
+		t.Fatalf("baseline-check must pass on honest sandbox, got: %+v", check)
+	}
+}
+
+// 对抗：agent 改动文件后 git commit --amend 根 commit——工作树干净、
+// rev-list 计数仍为 1，但 HEAD 已不等于启动前记录的基线 → 校验必须 FAIL。
+func TestRunDetectsAmendedHistory(t *testing.T) {
+	taskDir, sb := setupTask(t, protocol.TestCommand{Name: "baseline-check", Cmd: baselineCmd})
+	baseline := gitRev(t, sb)
+	if err := os.WriteFile(filepath.Join(sb, "work.txt"), []byte("tampered"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, sb, "-c", "user.email=runner@agentbattle", "-c", "user.name=runner",
+		"commit", "--amend", "-a", "-m", "evil-amend")
+	rep, err := Run(taskDir, sb, baseline, []byte(devKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var check *protocol.TestResult
+	for i := range rep.Results {
+		if rep.Results[i].Name == "baseline-check" {
+			check = &rep.Results[i]
+		}
+	}
+	if check == nil {
+		t.Fatal("baseline-check result missing")
+	}
+	if check.Passed {
+		t.Fatalf("amended history must fail baseline-check, got: %+v", check)
+	}
+}
+
+// baselineSHA 为空串时不注入环境变量（向后兼容），判分流程正常走完。
+func TestRunEmptyBaselineNoInjection(t *testing.T) {
+	taskDir, sb := setupTask(t, protocol.TestCommand{
+		Name: "no-env", Cmd: `[ -z "$AGENTBATTLE_BASELINE_SHA" ]`})
+	rep, err := Run(taskDir, sb, "", []byte(devKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rep.Results {
+		if r.Name == "no-env" && !r.Passed {
+			t.Fatalf("empty baseline must not inject env var, got: %+v", r)
+		}
 	}
 }
 

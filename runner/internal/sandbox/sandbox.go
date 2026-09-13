@@ -108,15 +108,40 @@ func git(dir string, args ...string) error {
 	full := append([]string{"-c", "core.autocrlf=false", "-c", "commit.gpgsign=false"}, args...)
 	cmd := exec.CommandContext(ctx, "git", full...)
 	cmd.Dir = dir
-	for _, e := range os.Environ() {
-		if k, _, ok := strings.Cut(e, "="); ok && (strings.EqualFold(k, "GIT_DIR") || strings.EqualFold(k, "GIT_WORK_TREE")) {
-			continue
-		}
-		cmd.Env = append(cmd.Env, e)
-	}
+	cmd.Env = gitEnv()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git %v: %w: %s", args, err, out)
 	}
 	return nil
+}
+
+// gitEnv 返回过滤掉 GIT_DIR/GIT_WORK_TREE 的宿主环境副本，防止 git 调用
+// 被环境变量误指到宿主仓库。
+func gitEnv() []string {
+	env := make([]string, 0, len(os.Environ()))
+	for _, e := range os.Environ() {
+		if k, _, ok := strings.Cut(e, "="); ok && (strings.EqualFold(k, "GIT_DIR") || strings.EqualFold(k, "GIT_WORK_TREE")) {
+			continue
+		}
+		env = append(env, e)
+	}
+	return env
+}
+
+// HeadRev 返回仓库当前 HEAD commit SHA（完整 40 位）。
+// 调用方须在 agent 执行前记录该值，供判分时校验 agent 未改写提交历史
+// （如 git commit --amend 架空工作树 diff 校验）。
+// 非 git 仓库、无 commit 等情况返回 error。
+func HeadRev(repoPath string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), gitDefaultTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-c", "core.autocrlf=false", "rev-parse", "HEAD")
+	cmd.Dir = repoPath
+	cmd.Env = gitEnv()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("sandbox: git rev-parse HEAD: %w: %s", err, out)
+	}
+	return strings.TrimSpace(string(out)), nil
 }

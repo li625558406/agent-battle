@@ -95,9 +95,14 @@ func verifyManifest(testsDir string, key []byte) (protocol.JudgeManifest, error)
 
 // Run 验签判分包后，在沙箱内逐条执行测试并产出 JudgeReport。
 //
+// baselineSHA 是 agent 启动前记录的沙箱 HEAD SHA（见 sandbox.HeadRev），
+// 会以环境变量 AGENTBATTLE_BASELINE_SHA 注入每条判分命令，供 manifest 侧
+// 校验 agent 未改写提交历史（如 commit --amend 架空工作树 diff 校验）。
+// 传空串则不注入（兼容无基线校验的判分包）。
+//
 // 步骤：验签 → 拷贝 tests/（除 manifest.json、sig）到 sandbox/.judge/ →
 // 沙箱 .gitignore 追加 .judge/ → bash -c 执行 → git diff HEAD 计算 DiffHash。
-func Run(taskDir, sandbox string, key []byte) (protocol.JudgeReport, error) {
+func Run(taskDir, sandbox, baselineSHA string, key []byte) (protocol.JudgeReport, error) {
 	testsDir := filepath.Join(taskDir, "tests")
 	m, err := verifyManifest(testsDir, key)
 	if err != nil {
@@ -114,7 +119,7 @@ func Run(taskDir, sandbox string, key []byte) (protocol.JudgeReport, error) {
 
 	rep := protocol.JudgeReport{TaskID: m.TaskID}
 	for _, tc := range m.Tests {
-		res := runOne(tc, sandbox)
+		res := runOne(tc, sandbox, baselineSHA)
 		rep.Results = append(rep.Results, res)
 		if res.Passed {
 			rep.Passed++
@@ -135,14 +140,19 @@ func Run(taskDir, sandbox string, key []byte) (protocol.JudgeReport, error) {
 var testTimeout = 2 * time.Minute
 
 // runOne 在沙箱 cwd 下执行单条测试命令。
+// baselineSHA 非空时以 AGENTBATTLE_BASELINE_SHA 注入命令环境（env 由 judge
+// 进程构造，agent 进程已退出、无法影响）；空串则不注入。
 // 命令超时（testTimeout）被杀 → Passed=false、ExitCode=-1，
 // 错误不外抛：测试失败 ≠ 判分失败。
-func runOne(tc protocol.TestCommand, sandbox string) protocol.TestResult {
+func runOne(tc protocol.TestCommand, sandbox, baselineSHA string) protocol.TestResult {
 	res := protocol.TestResult{Name: tc.Name}
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "bash", "-c", tc.Cmd)
 	cmd.Dir = sandbox
+	if baselineSHA != "" {
+		cmd.Env = append(os.Environ(), "AGENTBATTLE_BASELINE_SHA="+baselineSHA)
+	}
 	// 超时 kill 只杀 bash 自身；其孤儿子进程可能继承 stdout 管道导致
 	// Wait 永久阻塞（如 sleep infinity）。WaitDelay 保证 kill 后最迟
 	// 2s 强制关闭管道返回，超时是真正的硬上界。
