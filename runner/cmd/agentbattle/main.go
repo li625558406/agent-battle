@@ -19,6 +19,7 @@ const usage = `agentbattle — 本地 agent 对战 runner
                        --env-a K=V --env-b K=V [--rounds 20] [--out DIR] [--yolo]
                        [--server URL --task-id ID --name-a N --token-a T
                         --name-b N --token-b T]
+                       [--dry-run 零出网影子赛，导出全部 payload]
   agentbattle sign     --task <任务目录> [--key SECRET]
   agentbattle register --server URL --name X
   agentbattle fetch    --server URL --task <任务ID> --out DIR
