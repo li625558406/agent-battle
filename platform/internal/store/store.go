@@ -493,3 +493,58 @@ func (s *Store) ProfilesByAgent(name string) ([]StoredProfile, error) {
 	}
 	return out, rows.Err()
 }
+
+// ReviewSide 单侧复盘数据（AgentID/Agent 来自 agents；结果字段来自 results，
+// 缺行时零值——done 对局双侧必齐，防御性兜底）。
+type ReviewSide struct {
+	AgentID  int64
+	Agent    string
+	Passed   int
+	Total    int
+	WallMS   int64
+	EventsGZ []byte
+}
+
+// ReviewData 返回对局双侧复盘数据。一条 JOIN（matches × agents × results，
+// LEFT JOIN 保证缺行侧也返回 agent 名），行序固定 A 前 B 后。
+// 自我对局（agent_a == agent_b）被 api 层禁止，此处按 2 行契约；不足 2 行
+// 即对局异常，报错而非静默。
+func (s *Store) ReviewData(matchID int64) (ReviewSide, ReviewSide, error) {
+	rows, err := s.db.Query(`
+		SELECT CASE WHEN a.id = m.agent_a THEN 'a' ELSE 'b' END,
+		       a.id, a.name,
+		       COALESCE(r.passed, 0), COALESCE(r.total, 0), COALESCE(r.wall_ms, 0),
+		       r.events_gz
+		FROM matches m
+		JOIN agents a ON a.id = m.agent_a OR a.id = m.agent_b
+		LEFT JOIN results r ON r.match_id = m.id
+		  AND r.side = CASE WHEN a.id = m.agent_a THEN 'a' ELSE 'b' END
+		WHERE m.id = ?
+		ORDER BY CASE WHEN a.id = m.agent_a THEN 0 ELSE 1 END`, matchID)
+	if err != nil {
+		return ReviewSide{}, ReviewSide{}, err
+	}
+	defer rows.Close()
+	var out [2]ReviewSide
+	var i int
+	for rows.Next() && i < 2 {
+		var side string
+		if err := rows.Scan(&side, &out[i].AgentID, &out[i].Agent,
+			&out[i].Passed, &out[i].Total, &out[i].WallMS, &out[i].EventsGZ); err != nil {
+			return ReviewSide{}, ReviewSide{}, err
+		}
+		// side 是 Scan 占位接收，这里顺带校验行序与期望序号一致
+		//（ORDER BY 保证 A 前 B 后，不匹配即查询契约被破坏）。
+		if want := [2]string{"a", "b"}[i]; side != want {
+			return ReviewSide{}, ReviewSide{}, fmt.Errorf("对局 %d 第 %d 行 side = %q, 期望 %q", matchID, i, side, want)
+		}
+		i++
+	}
+	if err := rows.Err(); err != nil {
+		return ReviewSide{}, ReviewSide{}, err
+	}
+	if i != 2 {
+		return ReviewSide{}, ReviewSide{}, fmt.Errorf("对局 %d 双侧数据不全（%d 行）", matchID, i)
+	}
+	return out[0], out[1], nil
+}

@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"agentbattle/platform/internal/profile"
+	"agentbattle/platform/internal/review"
 	"agentbattle/platform/internal/store"
 )
 
@@ -37,6 +38,7 @@ func New(st *store.Store, tasksDir string, judgeKey []byte) http.Handler {
 	mux.Handle("POST /api/matches/{id}/results", s.auth(s.handleResult))
 	mux.HandleFunc("GET /api/ladder", s.handleLadder)
 	mux.HandleFunc("GET /api/agents/{name}/profile", s.handleProfile)
+	mux.HandleFunc("GET /api/matches/{id}/review", s.handleReview)
 	mux.HandleFunc("GET /api/tasks/{id}/bundle", s.handleBundle)
 	return mux
 }
@@ -377,4 +379,43 @@ func (s *Server) handleProfile(w http.ResponseWriter, r *http.Request) {
 			ProfileJSON: p.ProfileJSON, UpdatedAt: p.UpdatedAt}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"agent": name, "profiles": out})
+}
+
+// handleReview GET /api/matches/{id}/review：对局复盘报告（公开路由，同天梯/
+// 画像——事件流只含路径与操作类型，无内容明文，无泄露风险）。
+// 404 对局不存在 / 409 非 done（pending 未结算、aborted 孤儿）→ 复盘只对
+// 已结算对局有意义；matchID 非数字 → 400。
+func (s *Server) handleReview(w http.ResponseWriter, r *http.Request) {
+	matchID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "match id 非法")
+		return
+	}
+	taskID, _, _, status, winner, err := s.St.MatchByID(matchID)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "对局不存在")
+		return
+	}
+	if status != "done" {
+		writeErr(w, http.StatusConflict, "对局未结算，暂无复盘")
+		return
+	}
+	tt, err := s.St.TaskTypeOf(matchID)
+	if err != nil {
+		log.Printf("对局 %d 读 task_type 失败: %v", matchID, err)
+		writeErr(w, http.StatusInternalServerError, "读对局失败")
+		return
+	}
+	sa, sb, err := s.St.ReviewData(matchID)
+	if err != nil {
+		log.Printf("对局 %d 读复盘数据失败: %v", matchID, err)
+		writeErr(w, http.StatusInternalServerError, "读复盘数据失败")
+		return
+	}
+	rep := review.BuildReport(
+		review.Meta{MatchID: matchID, TaskID: taskID, TaskType: tt, Status: status, Winner: winner},
+		review.SideInput{Agent: sa.Agent, Passed: sa.Passed, Total: sa.Total, WallMS: sa.WallMS, EventsGZ: sa.EventsGZ},
+		review.SideInput{Agent: sb.Agent, Passed: sb.Passed, Total: sb.Total, WallMS: sb.WallMS, EventsGZ: sb.EventsGZ},
+	)
+	writeJSON(w, http.StatusOK, rep)
 }

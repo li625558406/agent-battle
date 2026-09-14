@@ -381,3 +381,85 @@ func TestProfileKnownDifference(t *testing.T) {
 		t.Fatalf("分数偏离百分位公式预期（A≈75 B≈25）: A=%v B=%v", sa, sb)
 	}
 }
+
+// TestReviewReport M2 计划 2 验收：镜像 1 局后 review 子命令按 matchID 查得
+// 结构完整的复盘——双方 agent 名、结论行胜者、对比表、双侧时间线非空。
+// 标注（first_error）依赖事件流含 error，真实对局不确定，由 review 包单测
+// 确定性覆盖；此处只断结构。
+func TestReviewReport(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short 模式跳过黑盒 E2E")
+	}
+	root := findRepoRoot(t)
+	bin := filepath.Join(t.TempDir(), "agentbattle.exe")
+	buildBin(t, root, bin, "./runner/cmd/agentbattle")
+	serverBin := filepath.Join(t.TempDir(), "agentbattle-server.exe")
+	buildBin(t, root, serverBin, "./platform/cmd/agentbattle-server")
+
+	tasksDir := t.TempDir()
+	if err := copyDir(filepath.Join(root, "examples", "fix-add"), filepath.Join(tasksDir, "fix-add")); err != nil {
+		t.Fatalf("拷贝示例任务失败: %v", err)
+	}
+	dbPath := filepath.Join(t.TempDir(), "review-e2e.db")
+	addr := fmt.Sprintf("127.0.0.1:%d", freePort(t))
+	srvCmd := exec.Command(serverBin, "--addr", addr, "--tasks", tasksDir, "--store", dbPath)
+	srvCmd.Dir = root
+	var srvOut bytes.Buffer
+	srvCmd.Stdout = &srvOut
+	srvCmd.Stderr = &srvOut
+	if err := srvCmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		srvCmd.Process.Kill()
+		srvCmd.Wait()
+		if t.Failed() {
+			t.Logf("server 输出:\n%s", srvOut.String())
+		}
+	})
+	waitHTTP(t, "http://"+addr+"/api/ladder")
+
+	run := func(args ...string) string {
+		t.Helper()
+		c := exec.Command(bin, args...)
+		b, err := c.CombinedOutput()
+		if err != nil {
+			t.Fatalf("cli %v: %v\n%s", args, err, b)
+		}
+		return string(b)
+	}
+	tokA := extractToken(t, run("register", "--server", "http://"+addr, "--name", "revA"))
+	tokB := extractToken(t, run("register", "--server", "http://"+addr, "--name", "revB"))
+
+	taskOut := filepath.Join(t.TempDir(), "task")
+	run("fetch", "--server", "http://"+addr, "--task", "fix-add", "--out", taskOut)
+	run("mirror",
+		"--server", "http://"+addr,
+		"--task", taskOut,
+		"--task-id", "fix-add",
+		"--agent", "echo",
+		"--fix-a", "add() { echo $(( $1 + $2 )); }",
+		"--rounds", "1",
+		"--name-a", "revA", "--token-a", tokA,
+		"--name-b", "revB", "--token-b", tokB,
+		"--out", filepath.Join(t.TempDir(), "reports"))
+
+	// 独立起服首个对局 id 恒为 1；--fix-a 判 a 胜（与 TestPlatformLoopEcho
+	// 同一确定性来源：A 2/2 > B 1/2）
+	rep := run("review", "--server", "http://"+addr, "--match", "1")
+	for _, want := range []string{
+		"对局 1", "revA", "revB", "胜者 revA", "通过率", "时间线",
+	} {
+		if !strings.Contains(rep, want) {
+			t.Fatalf("复盘输出缺 %q:\n%s", want, rep)
+		}
+	}
+
+	// 负路径：不存在的对局 → 非零退出且错误含 404
+	c := exec.Command(bin, "review", "--server", "http://"+addr, "--match", "999")
+	if b, err := c.CombinedOutput(); err == nil {
+		t.Fatalf("不存在对局应报错:\n%s", b)
+	} else if !strings.Contains(string(b), "404") {
+		t.Fatalf("错误应含 404: %v\n%s", err, b)
+	}
+}

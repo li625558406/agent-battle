@@ -42,11 +42,11 @@ func Recompute(st *store.Store, agentID int64, taskType string) error {
 	}
 	own := make([]MatchMetrics, len(ownRows))
 	for i, r := range ownRows {
-		own[i] = ExtractMetrics(decodeEvents(r.EventsGZ), r.Passed, r.Total, r.WallMS)
+		own[i] = ExtractMetrics(DecodeEvents(r.EventsGZ), r.Passed, r.Total, r.WallMS)
 	}
 	base := make([]MatchMetrics, len(baseRows))
 	for i, r := range baseRows {
-		base[i] = ExtractMetrics(decodeEvents(r.EventsGZ), r.Passed, r.Total, r.WallMS)
+		base[i] = ExtractMetrics(DecodeEvents(r.EventsGZ), r.Passed, r.Total, r.WallMS)
 	}
 	p := BuildProfile(ag.Name, taskType, own, base, time.Now().Unix())
 	b, err := json.Marshal(p)
@@ -82,11 +82,12 @@ func (l *limitErrReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// decodeEvents 解压 NDJSON 事件流；正常读到 EOF 时返回累积的事件，任何其他
+// DecodeEvents 解压 NDJSON 事件流；正常读到 EOF 时返回累积的事件，任何其他
 // 失败（空输入、坏 gzip 头、中段截断/坏 CRC/畸形 JSON、解压超 maxEventBytes
-// 等）整流丢弃返回 nil（该局降级为无事件流，由 ExtractMetrics/BuildProfile
-// 的缺席规则处理，不阻断整场画像；也绝不把残缺数据带进画像）。
-func decodeEvents(gz []byte) []protocol.Event {
+// 等）整流丢弃返回 nil（降级为无事件流，由 ExtractMetrics/BuildProfile/
+// review.BuildReport 的缺席规则处理，绝不把残缺数据带进下游）。
+// 导出供 review 包复用（复盘与画像共用同一解码与降级口径）。
+func DecodeEvents(gz []byte) []protocol.Event {
 	if len(gz) == 0 {
 		return nil
 	}
