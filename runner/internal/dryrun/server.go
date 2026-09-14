@@ -190,7 +190,8 @@ type resultReq struct {
 }
 
 // handleResult 编排 POST /api/matches/{id}/results：首侧上报应答 waiting，
-// 双侧到齐按通过率判 winner（同则 tie——影子赛只演示数据，不预测平台的
+// a/b 双侧到齐按通过率判 winner（非 a/b 的 side 只落盘不参与结算；同则
+// tie——影子赛只演示数据，不预测平台的
 // 计时规则）。事件流解码成功附加进导出文件，失败记 events_decode_error
 // 降级不中断（与复盘管道降级口径一致）。sides 写入与 dump 落盘同持 mu，
 // 保证导出文件序与编排状态一致。
@@ -226,10 +227,16 @@ func (s *Server) handleResult(w http.ResponseWriter, r *http.Request) {
 	if s.sides[matchID] == nil {
 		s.sides[matchID] = map[string]resultSide{}
 	}
+	// 非 a/b 的 side 只落盘登记，不参与结算——否则后续 a/b 判定会被
+	// map 里的杂侧干扰（甚至凭 len==2 用零值幻影侧判 winner）
 	s.sides[matchID][req.Side] = resultSide{Passed: req.Passed, Total: req.Total}
 	s.dumpFileLocked(r, df, "upload"+sideSuffix(req.Side), note)
+	_, hasA := s.sides[matchID]["a"]
+	_, hasB := s.sides[matchID]["b"]
 	var resp map[string]any
-	if len(s.sides[matchID]) < 2 {
+	if !hasA || !hasB {
+		// done 判定看 a/b 两个具名侧是否均到位，而非 map 长度——上报
+		// side:"a"+"c" 这类杂侧组合不得用零值幻影 b 结算
 		resp = map[string]any{"status": "waiting"}
 	} else {
 		resp = map[string]any{
@@ -357,10 +364,11 @@ func (s *Server) dumpFileLocked(r *http.Request, df *dumpFile, slug, note string
 	})
 }
 
-// newDumpFile 组装导出结构：headers 展平；body 为合法 JSON（含前导空白
-// 的合法 JSON——json.Valid 容忍前导空白，不做任何裁剪，原样嵌入内容无损）
-// 时逐字节保真嵌入；非法 JSON 字符串化记录（转义无损还原原文，且保证
-// 导出文件永远是合法 JSON）。
+// newDumpFile 组装导出结构：headers 展平；仅当 body 以裸 { 或 [ 开头且为
+// 合法 JSON 时逐字节保真嵌入（json.Valid 容忍前导空白，故带前导空白的
+// 合法 JSON 不满足裸开头判定，同样走字符串化路径）；其余 body 一律 JSON
+// 字符串化记录（转义基本可还原原文，但非法 UTF-8 字节按标准库规则替换为
+// U+FFFD，此时不可逆），并保证导出文件永远是合法 JSON。
 func newDumpFile(r *http.Request, body []byte) *dumpFile {
 	hdrs := map[string]string{}
 	for k, v := range r.Header {
@@ -370,6 +378,7 @@ func newDumpFile(r *http.Request, body []byte) *dumpFile {
 		return &dumpFile{Method: r.Method, Path: r.URL.Path,
 			Headers: hdrs, Body: json.RawMessage(body)}
 	}
+	// 字符串化：非法 UTF-8 字节被 json.Marshal 替换为 U+FFFD（不可逆）
 	q, err := json.Marshal(string(body))
 	if err != nil {
 		q = []byte(`"<marshal fallback failed>"`)

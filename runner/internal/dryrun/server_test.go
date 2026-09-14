@@ -166,35 +166,20 @@ func TestNewServerNonEmptyDir(t *testing.T) {
 	}
 }
 
-// TestHandleResultSkeleton upload 骨架三分支：404（非数字、int64 溢出）、
-// waiting 应答、upload dump 落盘。
-func TestHandleResultSkeleton(t *testing.T) {
-	s, out := newTestServer(t, "A", "B")
-	post := func(path, body string) *http.Response {
-		t.Helper()
-		resp, err := http.Post(s.Base()+path, "application/json", strings.NewReader(body))
+// TestHandleResultBadID 攻击用例：非数字 match id 与 int64 溢出 id 均 404。
+// （waiting/done 编排正路已由 TestUploadOrchestration 覆盖，此处只锁 id 校验。）
+func TestHandleResultBadID(t *testing.T) {
+	s, _ := newTestServer(t, "A", "B")
+	for _, p := range []string{"/api/matches/abc/results", "/api/matches/99999999999999999999/results"} {
+		resp, err := http.Post(s.Base()+p, "application/json", strings.NewReader(`{"side":"a"}`))
 		if err != nil {
 			t.Fatal(err)
 		}
-		t.Cleanup(func() { resp.Body.Close() })
-		return resp
-	}
-	// 攻击用例：非数字 id 与 int64 溢出 id 均 404
-	for _, p := range []string{"/api/matches/abc/results", "/api/matches/99999999999999999999/results"} {
-		if r := post(p, `{"side":"a"}`); r.StatusCode != http.StatusNotFound {
-			t.Fatalf("%s 应 404: %d", p, r.StatusCode)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("%s 应 404: %d", p, resp.StatusCode)
 		}
 	}
-	// 合法 id → 首侧 waiting 应答 + upload 分侧 dump
-	r := post("/api/matches/1/results", `{"side":"a","passed":1,"total":2}`)
-	if r.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d", r.StatusCode)
-	}
-	var body map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body["status"] != "waiting" {
-		t.Fatalf("首侧应答应 waiting: %v %v", body, err)
-	}
-	readDump(t, out, "001_upload_a.json")
 }
 
 // TestDumpFailure 写盘失败：DumpError 记录、Record 仍登记且 note 保留原描述。
@@ -388,5 +373,103 @@ func TestDecodeEventsZipBomb(t *testing.T) {
 	df := readDump(t, out, "001_upload_a.json")
 	if df.EventsDecodeError == "" {
 		t.Fatalf("超帽应记 events_decode_error: %+v", df)
+	}
+}
+
+// TestUploadUnknownSideNotDone 攻击用例：side:"c" 等杂侧只落盘不参与结算——
+// 上报 a 后再上报 c 不得凭 len==2 用零值幻影 b 触发 done；a/b 到齐才结算。
+func TestUploadUnknownSideNotDone(t *testing.T) {
+	s, out := newTestServer(t, "A", "B")
+	r1 := decodeResp(t, upload(t, s.Base(), 1, `{"side":"a","passed":1,"total":2}`))
+	if r1["status"] != "waiting" {
+		t.Fatalf("首侧应 waiting: %v", r1)
+	}
+	// 杂侧 c 通过率 2/2 高于 a——若被误当 b 结算，winner 会是幻影侧
+	r2 := decodeResp(t, upload(t, s.Base(), 1, `{"side":"c","passed":2,"total":2}`))
+	if r2["status"] != "waiting" {
+		t.Fatalf("side=c 不得触发 done（零值幻影 b）: %v", r2)
+	}
+	readDump(t, out, "002_upload.json") // 杂侧仍落盘，无后缀
+	r3 := decodeResp(t, upload(t, s.Base(), 1, `{"side":"b","passed":1,"total":2}`))
+	if r3["status"] != "done" || r3["winner"] != "tie" {
+		t.Fatalf("a/b 到齐才 done，且 c 的 2/2 不应计入: %v", r3)
+	}
+}
+
+// TestMarshalDumpFileEventsWithDecodeError events 与 events_decode_error
+// 同时存在（handleResult 中互斥、不可达的组合）时，marshalDumpFile 分段
+// 拼接仍必须是合法 JSON 且两字段都在——直接构造结构锁定序列化器。
+func TestMarshalDumpFileEventsWithDecodeError(t *testing.T) {
+	df := &dumpFile{
+		Method: "POST", Path: "/api/matches/1/results",
+		Headers:           map[string]string{"X-T": "v"},
+		Body:              json.RawMessage(`{"side":"a"}`),
+		Events:            []json.RawMessage{json.RawMessage(`{"seq":1}`)},
+		EventsDecodeError: "事件流 NDJSON 解析失败: boom",
+	}
+	bs, err := marshalDumpFile(df)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !json.Valid(bs) {
+		t.Fatalf("两字段共存时拼接应为合法 JSON:\n%s", bs)
+	}
+	var back dumpFile
+	if err := json.Unmarshal(bs, &back); err != nil {
+		t.Fatalf("解析失败: %v\n%s", err, bs)
+	}
+	// events 走 MarshalIndent 重缩进（语义等价），不能按原始字节比对
+	if len(back.Events) != 1 || !bytes.Contains(back.Events[0], []byte(`"seq"`)) {
+		t.Fatalf("events 丢失/不符: %s", back.Events)
+	}
+	if back.EventsDecodeError != df.EventsDecodeError {
+		t.Fatalf("events_decode_error 丢失: %q", back.EventsDecodeError)
+	}
+}
+
+// TestDecodeEventsExactCapBoundary 恰好等于 64MB 解压帽的流必须通过
+//（帽 +1 边界不变量：只有真实解压量超过帽才报错）。用一个合法事件行 +
+// 换行白填充到恰好 maxDecompressed 字节。
+func TestDecodeEventsExactCapBoundary(t *testing.T) {
+	var payload bytes.Buffer
+	payload.WriteString(`{"seq":1,"type":"tool_call","tool":"bash"}`)
+	payload.WriteByte('\n')
+	for payload.Len() < maxDecompressed {
+		payload.WriteByte('\n') // NDJSON 之后的纯空白，合法且不产生事件
+	}
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	if _, err := zw.Write(payload.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Len() != maxDecompressed {
+		t.Fatalf("前置校验：payload 应恰好 %d 字节，实际 %d", maxDecompressed, payload.Len())
+	}
+	evs, err := decodeEvents(base64.StdEncoding.EncodeToString(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("恰好等于帽的流应通过: %v", err)
+	}
+	if len(evs) != 1 {
+		t.Fatalf("应恰好解码出 1 条事件: %d", len(evs))
+	}
+}
+
+// TestDecodeEventsMalformedNDJSON gzip 合法但解压内容非 JSON → 应报
+// "NDJSON 解析失败"路径，而非 gzip/base64 错误。
+func TestDecodeEventsMalformedNDJSON(t *testing.T) {
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	if _, err := zw.Write([]byte("not json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	_, err := decodeEvents(base64.StdEncoding.EncodeToString(buf.Bytes()))
+	if err == nil || !strings.Contains(err.Error(), "NDJSON 解析失败") {
+		t.Fatalf("应报 NDJSON 解析失败: %v", err)
 	}
 }
