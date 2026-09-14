@@ -28,8 +28,12 @@ mirror 流程（原封不动）发出的请求 → `127.0.0.1:<随机端口>` �
 |---|---|---|
 | POST /api/agents | `001_register_a.json`、`002_register_b.json` | `{"id":N,"name":"<原名>","token":"dry-run-placeholder"}` |
 | POST /api/matches | `003_create_match.json` | `{"match_id":N,"judge_key":"dry-run-placeholder"}` |
-| POST /api/matches/{id}/results | `004_upload_a.json`、`005_upload_b.json` | `{"status":"done","winner":"<通过率高者胜，同则 tie——与 runner 侧 session.winner 同口径>","rating_a":1200,"rating_b":1200}` |
-| GET /api/tasks/{id}/bundle | 不落盘（这是平台→runner 方向，非"会收到的数据"） | 从本地任务目录打 zip（条目以任务为根，与平台 handleBundle 同义） |
+| POST /api/matches/{id}/results | `004_upload_a.json`、`005_upload_b.json` | 首侧 `{"status":"waiting"}`；双侧到齐 `{"status":"done","winner":"<通过率高者胜，同则 tie>","rating_a":1200,"rating_b":1200}` |
+
+两个实现口径（计划期核实的 mirror 流程事实）：
+
+1. **register 由 dry-run 接线代发**：mirror 本身不注册（`--server` 模式用现成 token），dry-run 模式下由 CLI 接线代码向假服务端依次注册 `--name-a`/`--name-b`，取回占位 token 供 CreateMatch/UploadResult 使用——payload 覆盖注册环节，用户能看到全部四类上传。
+2. **无 bundle 路由**：mirror 流程不含 fetch 步骤（任务来自本地目录），假服务端无需应答 bundle 下载；白名单外路由一律 404 fail-fast。
 
 导出文件结构（JSON）：`{"method","path","headers"（含 X-Token 占位凭证）,"body"（原样请求体）}`。upload 文件附加 `events` 数组——body 中 `events_gz_base64` 解压解码后的可读事件明细（路径+操作类型，无内容明文），原 base64 字段保留不动。
 
