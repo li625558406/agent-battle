@@ -4,12 +4,16 @@ package dryrun
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/iotest"
 
 	"agentbattle/runner/internal/client"
 )
@@ -138,5 +142,100 @@ func TestNewServerDirConflict(t *testing.T) {
 	}
 	if _, err := NewServer(Options{OutDir: file, NameA: "A", NameB: "B"}); err == nil {
 		t.Fatal("OutDir 为普通文件应报错")
+	}
+}
+
+// TestNewServerNonEmptyDir dry_run 目录已存在且非空时拒绝启动，防静默覆盖
+// 上一次的审计产物（攻击用例：重跑同 --out）。
+func TestNewServerNonEmptyDir(t *testing.T) {
+	out := t.TempDir()
+	dir := filepath.Join(out, "dry_run")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "001_old.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := NewServer(Options{OutDir: out, NameA: "A", NameB: "B"})
+	if err == nil || !strings.Contains(err.Error(), "非空") {
+		t.Fatalf("dry_run 目录非空应报错: %v", err)
+	}
+}
+
+// TestHandleResultSkeleton upload 骨架三分支：404（非数字、int64 溢出）、
+// waiting 应答、upload dump 落盘。
+func TestHandleResultSkeleton(t *testing.T) {
+	s, out := newTestServer(t, "A", "B")
+	post := func(path, body string) *http.Response {
+		t.Helper()
+		resp, err := http.Post(s.Base()+path, "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { resp.Body.Close() })
+		return resp
+	}
+	// 攻击用例：非数字 id 与 int64 溢出 id 均 404
+	for _, p := range []string{"/api/matches/abc/results", "/api/matches/99999999999999999999/results"} {
+		if r := post(p, `{"side":"a"}`); r.StatusCode != http.StatusNotFound {
+			t.Fatalf("%s 应 404: %d", p, r.StatusCode)
+		}
+	}
+	// 合法 id → waiting 应答 + upload dump（无分侧后缀——完整编排属 Task 2）
+	r := post("/api/matches/1/results", `{"side":"a","passed":1,"total":2}`)
+	if r.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", r.StatusCode)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body["status"] != "waiting" {
+		t.Fatalf("骨架应答应 waiting: %v %v", body, err)
+	}
+	readDump(t, out, "001_upload.json")
+}
+
+// TestDumpFailure 写盘失败：DumpError 记录、Record 仍登记且 note 保留原描述。
+func TestDumpFailure(t *testing.T) {
+	s, out := newTestServer(t, "echoA", "echoB")
+	// 删除导出目录并替换为同名普通文件，迫使 WriteFile 失败
+	dir := filepath.Join(out, "dry_run")
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dir, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := client.New(s.Base()).Register("echoA"); err != nil {
+		t.Fatalf("写盘失败不应影响 HTTP 应答: %v", err)
+	}
+	if s.DumpError() == nil {
+		t.Fatal("写盘失败应记入 DumpError")
+	}
+	recs := s.Records()
+	if len(recs) != 1 || !strings.Contains(recs[0].Note, "dump 失败") || !strings.Contains(recs[0].Note, "echoA") {
+		t.Fatalf("失败 Record 应含 dump 失败标记且保留原 note: %+v", recs)
+	}
+}
+
+// TestReadBodyErrorClassification 读 body 错误分类：仅超 10MB 帽回 413，
+// 其余读错误（断连等）回 400，不再一律 413。
+func TestReadBodyErrorClassification(t *testing.T) {
+	// 超帽 → 413
+	s, _ := newTestServer(t, "A", "B")
+	big := strings.Repeat("a", maxBody+1)
+	resp, err := http.Post(s.Base()+"/api/agents", "application/json", strings.NewReader(big))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("超帽应 413: %d", resp.StatusCode)
+	}
+	// 非超帽读错误（底层 reader 故障）→ 400 而非 413
+	errBroken := errors.New("模拟断连")
+	req := httptest.NewRequest(http.MethodPost, "/api/agents", io.NopCloser(iotest.ErrReader(errBroken)))
+	rec := httptest.NewRecorder()
+	(&Server{}).readBody(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("非超帽读错误应 400: %d", rec.Code)
 	}
 }

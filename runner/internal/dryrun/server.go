@@ -8,6 +8,7 @@ import (
 	"compress/gzip"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -43,7 +44,8 @@ type Record struct {
 	Note   string `json:"note"`
 }
 
-// dumpFile 导出文件结构：平台将收到的全部数据。
+// dumpFile 导出文件结构：平台将收到的请求方法、路径、请求头与 body
+// （Host/Content-Length 由协议层剥离，不在 headers 内）。
 type dumpFile struct {
 	Method            string            `json:"method"`
 	Path              string            `json:"path"`
@@ -80,6 +82,10 @@ func NewServer(opts Options) (*Server, error) {
 	dir := filepath.Join(opts.OutDir, "dry_run")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("创建 dry_run 导出目录失败: %w", err)
+	}
+	// 重跑防护：目录非空说明上次导出残留，静默覆盖会毁掉审计产物，直接拒绝
+	if ents, err := os.ReadDir(dir); err == nil && len(ents) > 0 {
+		return nil, fmt.Errorf("dry_run 目录非空（%d 个文件），疑似重跑——请换 --out 或清理后重试", len(ents))
 	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -187,11 +193,17 @@ func (s *Server) handleResult(w http.ResponseWriter, r *http.Request) {
 
 // ---- dump 落盘 ----
 
-// readBody 读请求体（10MB 帽，触帽 413 不落盘）。
+// readBody 读请求体（10MB 帽）：仅超帽回 413 不落盘；其余读错误
+// （断连等）回 400，不与超帽混报。
 func (s *Server) readBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
 	bs, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBody))
 	if err != nil {
-		http.Error(w, "请求体超过 10MB 帽", http.StatusRequestEntityTooLarge)
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			http.Error(w, "请求体超过 10MB 帽", http.StatusRequestEntityTooLarge)
+		} else {
+			http.Error(w, "读取请求体失败", http.StatusBadRequest)
+		}
 		return nil, false
 	}
 	return bs, true
@@ -256,24 +268,24 @@ func (s *Server) dumpFileLocked(r *http.Request, df *dumpFile, slug, note string
 	}
 	if err != nil && s.dumpErr == nil {
 		s.dumpErr = fmt.Errorf("写导出文件 %s 失败: %w", name, err)
-		note = "dump 失败: " + err.Error()
+		note = "dump 失败(" + note + "): " + err.Error()
 	}
 	s.records = append(s.records, Record{
 		Seq: s.seq, Method: r.Method, Path: r.URL.Path, File: name, Note: note,
 	})
 }
 
-// newDumpFile 组装导出结构：headers 展平；body 合法 JSON 原样嵌入、
+// newDumpFile 组装导出结构：headers 展平；body 合法 JSON 原样嵌入
+// （不做任何字节裁剪，前导空白的合法 JSON 依然 Valid，原样保真）、
 // 非法 JSON 字符串化（保证导出文件永远是合法 JSON）。
 func newDumpFile(r *http.Request, body []byte) *dumpFile {
 	hdrs := map[string]string{}
 	for k, v := range r.Header {
 		hdrs[k] = strings.Join(v, ",")
 	}
-	b := bytes.TrimLeft(body, " \t\r\n")
-	if len(b) > 0 && (b[0] == '{' || b[0] == '[') && json.Valid(b) {
+	if len(body) > 0 && (body[0] == '{' || body[0] == '[') && json.Valid(body) {
 		return &dumpFile{Method: r.Method, Path: r.URL.Path,
-			Headers: hdrs, Body: json.RawMessage(b)}
+			Headers: hdrs, Body: json.RawMessage(body)}
 	}
 	q, err := json.Marshal(string(body))
 	if err != nil {
