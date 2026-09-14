@@ -3,6 +3,8 @@ package dryrun
 
 import (
 	"bytes"
+	"compress/gzip"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +16,8 @@ import (
 	"strings"
 	"testing"
 	"testing/iotest"
+
+	"agentbattle/protocol"
 
 	"agentbattle/runner/internal/client"
 )
@@ -181,16 +185,16 @@ func TestHandleResultSkeleton(t *testing.T) {
 			t.Fatalf("%s 应 404: %d", p, r.StatusCode)
 		}
 	}
-	// 合法 id → waiting 应答 + upload dump（无分侧后缀——完整编排属 Task 2）
+	// 合法 id → 首侧 waiting 应答 + upload 分侧 dump
 	r := post("/api/matches/1/results", `{"side":"a","passed":1,"total":2}`)
 	if r.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d", r.StatusCode)
 	}
 	var body map[string]any
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body["status"] != "waiting" {
-		t.Fatalf("骨架应答应 waiting: %v %v", body, err)
+		t.Fatalf("首侧应答应 waiting: %v %v", body, err)
 	}
-	readDump(t, out, "001_upload.json")
+	readDump(t, out, "001_upload_a.json")
 }
 
 // TestDumpFailure 写盘失败：DumpError 记录、Record 仍登记且 note 保留原描述。
@@ -237,5 +241,152 @@ func TestReadBodyErrorClassification(t *testing.T) {
 	(&Server{}).readBody(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("非超帽读错误应 400: %d", rec.Code)
+	}
+}
+
+// uploadSample 构造合法的 events_gz_base64（gzip NDJSON 两个事件）。
+func uploadSample(t *testing.T) string {
+	t.Helper()
+	gz, err := client.GzipEvents([]protocol.Event{
+		{Seq: 1, TS: 1, Type: protocol.EventToolCall, Tool: "bash", Tokens: 5},
+		{Seq: 2, TS: 2, Type: protocol.EventError},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return base64.StdEncoding.EncodeToString(gz)
+}
+
+// upload 用裸 HTTP 上报一测（直接控制 body JSON）。
+func upload(t *testing.T, base string, matchID int64, body string) *http.Response {
+	t.Helper()
+	resp, err := http.Post(fmt.Sprintf("%s/api/matches/%d/results", base, matchID),
+		"application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { resp.Body.Close() })
+	return resp
+}
+
+// decodeResp 解析响应 JSON 到 map。
+func decodeResp(t *testing.T, resp *http.Response) map[string]any {
+	t.Helper()
+	var out map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("响应解析失败: %v", err)
+	}
+	return out
+}
+
+// TestUploadOrchestration 首侧 waiting、双侧 done 且 winner 按通过率判。
+// 全新目录 seq 从 1 起：本测共 4 次 upload → 001/002/003/004。
+func TestUploadOrchestration(t *testing.T) {
+	s, out := newTestServer(t, "A", "B")
+	b64 := uploadSample(t)
+
+	r1 := decodeResp(t, upload(t, s.Base(), 1,
+		fmt.Sprintf(`{"side":"a","passed":2,"total":2,"wall_ms":100,"events_gz_base64":%q}`, b64)))
+	if r1["status"] != "waiting" {
+		t.Fatalf("首侧应 waiting: %v", r1)
+	}
+	r2 := decodeResp(t, upload(t, s.Base(), 1, `{"side":"b","passed":1,"total":2,"wall_ms":200}`))
+	if r2["status"] != "done" || r2["winner"] != "a" {
+		t.Fatalf("双侧到齐应 done/winner=a: %v", r2)
+	}
+	if r2["rating_a"] != 1200.0 || r2["rating_b"] != 1200.0 {
+		t.Fatalf("rating 编排不符: %v", r2)
+	}
+
+	// tie：两边同比例
+	upload(t, s.Base(), 2, `{"side":"a","passed":1,"total":2,"wall_ms":50}`)
+	r4 := decodeResp(t, upload(t, s.Base(), 2, `{"side":"b","passed":1,"total":2,"wall_ms":999}`))
+	if r4["winner"] != "tie" {
+		t.Fatalf("同比例应 tie（影子赛不比时长）: %v", r4)
+	}
+
+	// 导出文件：upload_a 附加解码后事件、upload_b 无 events 字段
+	dfa := readDump(t, out, "001_upload_a.json")
+	if len(dfa.Events) != 2 {
+		t.Fatalf("upload_a 应附加 2 条事件: %d", len(dfa.Events))
+	}
+	if !bytes.Contains(dfa.Events[1], []byte(`"error"`)) {
+		t.Fatalf("事件内容不符: %s", dfa.Events[1])
+	}
+	dfb := readDump(t, out, "002_upload_b.json")
+	if len(dfb.Events) != 0 || dfb.EventsDecodeError != "" {
+		t.Fatalf("upload_b 不应有 events 字段: %+v", dfb)
+	}
+}
+
+// TestUploadEventsDecodeError 畸形 events_gz_base64：降级标注不中断。
+func TestUploadEventsDecodeError(t *testing.T) {
+	s, out := newTestServer(t, "A", "B")
+	r := decodeResp(t, upload(t, s.Base(), 1,
+		`{"side":"a","passed":0,"total":2,"events_gz_base64":"!!!"}`))
+	if r["status"] != "waiting" {
+		t.Fatalf("解码失败不应中断编排: %v", r)
+	}
+	df := readDump(t, out, "001_upload_a.json")
+	if df.EventsDecodeError == "" {
+		t.Fatalf("应记录 events_decode_error: %+v", df)
+	}
+}
+
+// TestDumpBodyFidelityWithPlaceholderToken 攻击用例（挂账 1）：请求 body
+// 与事件字符串值都含 body 占位符字面量——旧 LastIndex 定位会被事件内容
+// 误导击穿保真；分段确定性拼接无任何搜索，body 必须逐字节无损。
+func TestDumpBodyFidelityWithPlaceholderToken(t *testing.T) {
+	s, out := newTestServer(t, "A", "B")
+	gz, err := client.GzipEvents([]protocol.Event{
+		{Seq: 1, TS: 1, Type: protocol.EventToolCall, Tool: "@@DRYRUN_BODY@@", Hash: "h1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b64 := base64.StdEncoding.EncodeToString(gz)
+	raw := fmt.Sprintf(`{"side":"a","passed":2,"total":2,"note":"@@DRYRUN_BODY@@","events_gz_base64":%q}`, b64)
+	resp, err := http.Post(s.Base()+"/api/matches/1/results", "application/json", strings.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	// readDump 内部 json.Unmarshal 同时验证导出文件整体仍是合法 JSON
+	df := readDump(t, out, "001_upload_a.json")
+	if string(df.Body) != raw {
+		t.Fatalf("含占位符字面量时 body 仍应逐字节保真:\nwant %s\ngot  %s", raw, df.Body)
+	}
+	if len(df.Events) != 1 || !bytes.Contains(df.Events[0], []byte("@@DRYRUN_BODY@@")) {
+		t.Fatalf("事件应保留占位符字面量: %s", df.Events)
+	}
+}
+
+// TestDecodeEventsZipBomb 攻击用例（挂账 2）：解压后超过 64MB 帽的 gzip 流
+// 必须报错（zip 炸弹不打爆内存），且端到端记 events_decode_error 降级、
+// HTTP 流程不中断。
+func TestDecodeEventsZipBomb(t *testing.T) {
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	if _, err := zw.Write(bytes.Repeat([]byte{0}, (64<<20)+1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	b64 := base64.StdEncoding.EncodeToString(buf.Bytes())
+	if _, err := decodeEvents(b64); err == nil {
+		t.Fatal("解压后超 64MB 帽的事件流应报错")
+	}
+
+	// 端到端：超帽走降级路径，不中断编排
+	s, out := newTestServer(t, "A", "B")
+	r := decodeResp(t, upload(t, s.Base(), 1,
+		fmt.Sprintf(`{"side":"a","passed":0,"total":2,"events_gz_base64":%q}`, b64)))
+	if r["status"] != "waiting" {
+		t.Fatalf("超帽降级不应中断编排: %v", r)
+	}
+	df := readDump(t, out, "001_upload_a.json")
+	if df.EventsDecodeError == "" {
+		t.Fatalf("超帽应记 events_decode_error: %+v", df)
 	}
 }
