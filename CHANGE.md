@@ -1,5 +1,21 @@
 # CHANGE.md — 项目迭代记录
 
+## 2026-09-14 · M2 计划 3 完成：--dry-run 影子赛（M2 收官）
+
+**主题**：`mirror --dry-run` 零出网影子赛——完整走一遍注册/建局/双侧上报流程，全部请求发往本地回环假服务端并逐字节导出，用户开赛前可亲眼核查"平台将收到的全部数据"；M2 三件交付物（六维画像、复盘报告、影子赛）全部完成
+
+**核心变更**：
+- 新包 runner/internal/dryrun：本地回环假服务端（127.0.0.1 随机端口），三路由编排——POST /api/agents（自增 id + 占位 token dry-run-placeholder）、POST /api/matches（自增 match_id）、POST /api/matches/{id}/results（首侧 waiting、双侧到齐按通过率判 winner，非 a/b 杂侧只落盘不参与结算，不用零值幻影侧）
+- dump 分段确定性拼接落盘：method/path/headers 前导段 MarshalIndent 便于人读，body 以请求原始字节嵌入逐字节保真（不经 encoding/json 压缩/重缩进），events 语义等价重缩进；解码成功附加事件数组、失败记 events_decode_error 降级不中断；全程无字符串搜索/替换（不出现占位符碰撞类）
+- 公开面防御：10MB 单请求 body 帽（超帽 413 不落盘）、64MB 事件流解压总量帽（防 zip 炸弹，超帽报错不静默截断）、路由白名单外 404、导出目录非空拒绝重跑（防静默覆盖审计产物）、seq 序号与 sides 状态同持互斥锁（并发安全，导出文件序与编排状态一致）
+- mirror --dry-run 接线：与 --server 互斥（影子赛零出网承诺，给出 --server 会让用户误以为数据发去了平台）；--name-a/--name-b 必填且不得相同（同名注册无法分侧归因）；任务预检前移到建服之前（预检失败不产出半套 dump）；代发两次注册取占位 token 后 mirror 主流程零改动；收尾逐条打印拦截摘要 + payload 导出路径 + 隐私声明（"以上即平台将收到的全部数据。全程未出网；事件流仅含路径与操作类型，不含文件内容与用户配置"）；不拉天梯（平台→runner 方向不属于"平台会收到的数据"）
+- E2E TestDryRunMirror（runner/e2e/platform_e2e_test.go）：黑盒 exec 真实二进制，零出网跑通 1 局（--fix-a 判 A 2/2、B 1/2，与既有 E2E 同一确定性来源）→ 断言 stdout 摘要与隐私声明、5 个 payload 文件齐全且关键字段正确（含 upload 文件 X-Token 头的占位凭证）、互斥负路径非零退出
+- 实测校准断言形态：dump 前导段为缩进 JSON，body 为请求原始 compact 字节（`"name":"dryA"` 无空格）；dry-run-placeholder 只出现在 upload 文件的 X-Token 请求头（register 是被拦截的请求，token 在响应侧不入 dump）
+
+**遗留事项**：
+- M2 三件交付物全部完成；M3 公测项（匹配系统、盲评、Web Dashboard）待启动
+- M3 Web Dashboard 可复用 dump 文件做"上传预览"页
+
 ## 2026-09-13 · M2 计划 2 完成：对局复盘报告
 
 **主题**：任一已结算对局可按 matchID 查得结构完整的复盘报告——双方对比（通过率/耗时/崩溃/分数）+ 双侧事件时间线，CLI `review` 子命令与平台公开路由双端可查，E2E TestReviewReport 验收通过

@@ -463,3 +463,87 @@ func TestReviewReport(t *testing.T) {
 		t.Fatalf("错误应含 404: %v\n%s", err, b)
 	}
 }
+
+// TestDryRunMirror M2 计划 3 验收：mirror --dry-run 零出网跑通 1 局，五个
+// 导出 payload 齐全、内容正确、stdout 含隐私声明。不构 serverBin、不起平台
+// 进程——影子赛本就不需要 --server。确定性来源与 TestPlatformLoopEcho 相同：
+// --fix-a 使 A 2/2、B 1/2（空配置 file-only-change 判分对未改动工作区
+// vacuously 通过），dryrun.judgeWinner 按通过率判 → winner=a 恒定。
+//
+// 断言形态实测依据：dump 文件前导段（method/path/headers）为 MarshalIndent
+// 缩进形态，body 为请求原始字节的 compact 形态（键值间无空格，如
+// "name":"dryA"）；events 段为重缩进的 "events": [。"dry-run-placeholder"
+// 只出现在 upload 文件的 X-Token 请求头（register 是被拦截的请求，token
+// 在其响应里、不入 dump）。
+func TestDryRunMirror(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short 模式跳过黑盒 E2E")
+	}
+	root := findRepoRoot(t)
+	bin := filepath.Join(t.TempDir(), "agentbattle.exe")
+	buildBin(t, root, bin, "./runner/cmd/agentbattle")
+
+	out := filepath.Join(t.TempDir(), "reports")
+	run := func(args ...string) string {
+		t.Helper()
+		c := exec.Command(bin, args...)
+		b, err := c.CombinedOutput()
+		if err != nil {
+			t.Fatalf("cli %v: %v\n%s", args, err, b)
+		}
+		return string(b)
+	}
+	rep := run("mirror", "--dry-run",
+		"--task", filepath.Join(root, "examples", "fix-add"),
+		"--task-id", "fix-add",
+		"--agent", "echo",
+		"--fix-a", "add() { echo $(( $1 + $2 )); }",
+		"--rounds", "1",
+		"--name-a", "dryA", "--name-b", "dryB",
+		"--out", out)
+
+	for _, want := range []string{
+		"镜像对战完成", "影子赛完成", "全程未出网",
+		"001_register_a.json", "003_create_match.json", "005_upload_b.json",
+		"winner=a",
+	} {
+		if !strings.Contains(rep, want) {
+			t.Fatalf("dry-run 输出缺 %q:\n%s", want, rep)
+		}
+	}
+
+	// 五个 payload 齐全且关键字段正确
+	dryDir := filepath.Join(out, "dry_run")
+	ents, err := os.ReadDir(dryDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ents) != 5 {
+		t.Fatalf("应导出 5 个 payload: %d", len(ents))
+	}
+	assertContains := func(name string, subs ...string) {
+		t.Helper()
+		bs, err := os.ReadFile(filepath.Join(dryDir, name))
+		if err != nil {
+			t.Fatalf("读 %s 失败: %v", name, err)
+		}
+		for _, s := range subs {
+			if !strings.Contains(string(bs), s) {
+				t.Fatalf("%s 缺 %q:\n%s", name, s, bs)
+			}
+		}
+	}
+	assertContains("001_register_a.json", `"name":"dryA"`)
+	assertContains("002_register_b.json", `"name":"dryB"`)
+	assertContains("003_create_match.json", `"task_id":"fix-add"`, `"agent_a":"dryA"`, `"agent_b":"dryB"`)
+	assertContains("004_upload_a.json", `"side":"a"`, `"passed":2`, `"total":2`, `"events": [`,
+		"X-Token", "dry-run-placeholder")
+	assertContains("005_upload_b.json", `"side":"b"`, `"passed":1`, "dry-run-placeholder")
+
+	// 互斥负路径：--dry-run + --server 非零退出且文案含"互斥"
+	c := exec.Command(bin, "mirror", "--dry-run", "--server", "http://127.0.0.1:1",
+		"--task", filepath.Join(root, "examples", "fix-add"))
+	if b, err := c.CombinedOutput(); err == nil || !strings.Contains(string(b), "互斥") {
+		t.Fatalf("--dry-run 与 --server 应互斥: %v\n%s", err, b)
+	}
+}
