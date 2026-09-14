@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"agentbattle/protocol"
 	"agentbattle/runner/internal/adapter"
 	"agentbattle/runner/internal/judge"
 )
@@ -62,15 +63,23 @@ func (s Summary) RoundsPlayed() int { return s.WinsA + s.WinsB + s.Ties }
 
 // PrecheckTask 对任务目录做开赛前预检：manifest 加载 + 判分包签名校验，
 // 供 CLI 层在需要先行校验（如 dry-run 影子赛不得在预检失败后产出任何
-// dump）的场景复用。与 Mirror 内部预检同一套逻辑，无行为差异。
+// dump）的场景复用。与 Mirror 内部预检同一套逻辑（precheckTask），无行为差异。
 func PrecheckTask(taskDir string, judgeKey []byte) error {
-	if _, err := loadTask(taskDir); err != nil {
-		return fmt.Errorf("任务预检失败: %w", err)
+	_, err := precheckTask(taskDir, judgeKey)
+	return err
+}
+
+// precheckTask 是预检的单一事实源，返回加载好的任务供 Mirror 续用；
+// 错误文案是 CLI 层测试的锁定契约，改动需同步 mirror 相关用例。
+func precheckTask(taskDir string, judgeKey []byte) (protocol.TaskManifest, error) {
+	t, err := loadTask(taskDir)
+	if err != nil {
+		return protocol.TaskManifest{}, fmt.Errorf("任务预检失败: %w", err)
 	}
 	if err := judge.VerifyDir(taskDir, judgeKey); err != nil {
-		return fmt.Errorf("判分包预检失败: %w", err)
+		return protocol.TaskManifest{}, fmt.Errorf("判分包预检失败: %w", err)
 	}
-	return nil
+	return t, nil
 }
 
 // Mirror 顺序跑 N 局，每局 A、B 各一次 session.Run，返回汇总。
@@ -85,12 +94,9 @@ func Mirror(ctx context.Context, cfg MirrorConfig) (Summary, error) {
 	// 任务级预检，fail-fast：task.json 缺失/损坏、判分包缺失或验签不通过
 	// 属于任务配置错误，与 agent 无关。若不拦截，每局会在沙箱创建前失败并被
 	// 一律按 "该侧 agent 崩溃" 计入统计，最终静默产出垃圾汇总且 exit 0。
-	task, err := loadTask(cfg.TaskDir)
+	task, err := precheckTask(cfg.TaskDir, cfg.JudgeKey)
 	if err != nil {
-		return Summary{}, fmt.Errorf("任务预检失败: %w", err)
-	}
-	if err := judge.VerifyDir(cfg.TaskDir, cfg.JudgeKey); err != nil {
-		return Summary{}, fmt.Errorf("判分包预检失败: %w", err)
+		return Summary{}, err
 	}
 	taskID := task.TaskID
 	sum := Summary{TaskID: taskID, Rounds: cfg.Rounds,

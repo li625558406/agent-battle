@@ -113,6 +113,9 @@ func NewServer(opts Options) (*Server, error) {
 // Base 返回 client 接线用的根地址。
 func (s *Server) Base() string { return "http://" + s.ln.Addr().String() }
 
+// Dir 返回 dump 导出目录（CLI 收尾展示用，避免子目录名在调用方硬编码）。
+func (s *Server) Dir() string { return s.dir }
+
 // Close 关停假服务端。
 func (s *Server) Close() error { return s.srv.Close() }
 

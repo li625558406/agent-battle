@@ -73,6 +73,9 @@ func cmdMirror(args []string) error {
 		if *nameA == "" || *nameB == "" {
 			return fmt.Errorf("--dry-run 模式需要 --name-a/--name-b（将作为注册 payload 的真实字段）")
 		}
+		if *nameA == *nameB {
+			return fmt.Errorf("--name-a 与 --name-b 不能相同（同名注册无法分侧归因，导出文件将缺失一侧）")
+		}
 		if tid == "" {
 			tid = filepath.Base(*task)
 		}
@@ -156,7 +159,7 @@ func cmdMirror(args []string) error {
 		if err := ds.DumpError(); err != nil {
 			return fmt.Errorf("dry-run 导出失败: %w", err)
 		}
-		fmt.Printf("payload 已导出: %s\n", filepath.Join(outDir, "dry_run"))
+		fmt.Printf("payload 已导出: %s\n", ds.Dir())
 		fmt.Println("影子赛完成：以上即平台将收到的全部数据。全程未出网；事件流仅含路径与操作类型，不含文件内容与用户配置（CLAUDE.md/skills/记忆永不上传）。")
 		return nil
 	}

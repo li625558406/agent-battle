@@ -18,6 +18,12 @@ func TestMirrorDryRunNegative(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "--name-a") {
 		t.Fatalf("--dry-run 缺名应报错: %v", err)
 	}
+	// --name-a == --name-b：同名注册在假服务端两笔都归 side "a"，
+	// 导出产物 register_b 缺失，误导逐文件核查，必须开赛前拦截
+	err = cmdMirror([]string{"--task", "x", "--dry-run", "--name-a", "A", "--name-b", "A"})
+	if err == nil || !strings.Contains(err.Error(), "不能相同") {
+		t.Fatalf("--name-a 与 --name-b 同名应报错: %v", err)
+	}
 	// 校验通过后进入既有流程（任务目录不存在 → 任务预检失败），
 	// 证明 dry-run 不需要 --server 即可启动离线对战。
 	// 用 --agent echo 绕开 claude-code 的本机 Detect 预检，保证断言确定性。
