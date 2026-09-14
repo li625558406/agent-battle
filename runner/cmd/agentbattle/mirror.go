@@ -87,6 +87,11 @@ func cmdMirror(args []string) error {
 	}
 	tokA2, tokB2 := *tokA, *tokB
 	if *dryRun {
+		// 建服前先做任务预检：影子赛的承诺是"预检失败不产出半套 dump"，
+		// 若放到 session.Mirror 内部才拦截，此处已代发注册并落了 2 个 register 文件
+		if err := session.PrecheckTask(*task, sessionDevKey()); err != nil {
+			return err
+		}
 		d, err := dryrun.NewServer(dryrun.Options{OutDir: outDir, NameA: *nameA, NameB: *nameB})
 		if err != nil {
 			return err

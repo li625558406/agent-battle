@@ -21,8 +21,10 @@ func TestMirrorDryRunNegative(t *testing.T) {
 	// 校验通过后进入既有流程（任务目录不存在 → 任务预检失败），
 	// 证明 dry-run 不需要 --server 即可启动离线对战。
 	// 用 --agent echo 绕开 claude-code 的本机 Detect 预检，保证断言确定性。
+	// --out 指向本次专属临时目录：避免落默认共享 outDir，前次运行的
+	// dry_run 残留会让 NewServer 的防覆盖检查击穿后续运行（不可重复执行）。
 	err = cmdMirror([]string{"--task", "does-not-exist", "--dry-run", "--agent", "echo",
-		"--name-a", "A", "--name-b", "B"})
+		"--name-a", "A", "--name-b", "B", "--out", t.TempDir()})
 	if err == nil || !strings.Contains(err.Error(), "任务预检失败") {
 		t.Fatalf("离线流程应可达并被任务预检拦截: %v", err)
 	}

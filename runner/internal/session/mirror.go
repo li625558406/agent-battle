@@ -60,6 +60,19 @@ type Summary struct {
 // RoundsPlayed 返回已完成的场次数（分出胜负 + 平局，不含取消中断）。
 func (s Summary) RoundsPlayed() int { return s.WinsA + s.WinsB + s.Ties }
 
+// PrecheckTask 对任务目录做开赛前预检：manifest 加载 + 判分包签名校验，
+// 供 CLI 层在需要先行校验（如 dry-run 影子赛不得在预检失败后产出任何
+// dump）的场景复用。与 Mirror 内部预检同一套逻辑，无行为差异。
+func PrecheckTask(taskDir string, judgeKey []byte) error {
+	if _, err := loadTask(taskDir); err != nil {
+		return fmt.Errorf("任务预检失败: %w", err)
+	}
+	if err := judge.VerifyDir(taskDir, judgeKey); err != nil {
+		return fmt.Errorf("判分包预检失败: %w", err)
+	}
+	return nil
+}
+
 // Mirror 顺序跑 N 局，每局 A、B 各一次 session.Run，返回汇总。
 // 单局单侧失败计入该侧错误并按规则判给对方；汇总写入 OutDir 后返回。
 func Mirror(ctx context.Context, cfg MirrorConfig) (Summary, error) {
