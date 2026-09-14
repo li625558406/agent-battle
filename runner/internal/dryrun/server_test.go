@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"testing/iotest"
 
@@ -454,6 +455,154 @@ func TestDecodeEventsExactCapBoundary(t *testing.T) {
 	}
 	if len(evs) != 1 {
 		t.Fatalf("应恰好解码出 1 条事件: %d", len(evs))
+	}
+}
+
+// dumpCount 统计导出目录内的落盘文件数。
+func dumpCount(t *testing.T, outDir string) int {
+	t.Helper()
+	ents, err := os.ReadDir(filepath.Join(outDir, "dry_run"))
+	if err != nil {
+		t.Fatalf("读导出目录失败: %v", err)
+	}
+	return len(ents)
+}
+
+// TestUnknownRoute404 攻击用例：白名单外路由 fail-fast 且零落盘——
+// GET /api/ladder（路径白名单外）、GET /api/agents（方法不匹配）、
+// match id=0（既有用例只锁非数字/溢出，走的是 ParseInt 出错分支，
+// 此处锁 matchID<=0 判定分支）都必须 404，且不登记 Record、不产生文件。
+func TestUnknownRoute404(t *testing.T) {
+	s, out := newTestServer(t, "A", "B")
+
+	// 路径白名单外
+	resp, err := http.Get(s.Base() + "/api/ladder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("GET /api/ladder 应 404: %d", resp.StatusCode)
+	}
+
+	// 方法不匹配（路由只注册了 POST /api/agents）：Go 1.22+ ServeMux 对
+	// 路径命中但方法不匹配返回 405（比 404 更精确），同样 fail-fast 零编排
+	resp, err = http.Get(s.Base() + "/api/agents")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("GET 打到 POST 路由应 405: %d", resp.StatusCode)
+	}
+
+	// match id 0：走 matchID<=0 拒绝分支
+	resp = upload(t, s.Base(), 0, `{"side":"a","passed":1,"total":2}`)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("match id=0 应 404: %d", resp.StatusCode)
+	}
+
+	// 全部 fail-fast：无 Record、无文件
+	if recs := s.Records(); len(recs) != 0 {
+		t.Fatalf("白名单外请求不应登记 Record: %+v", recs)
+	}
+	if n := dumpCount(t, out); n != 0 {
+		t.Fatalf("白名单外请求不应落盘: %d 个文件", n)
+	}
+}
+
+// TestOversizedBody413 攻击用例：超 10MB 帽的 body 必须 413 且不落盘——
+// 既有 TestReadBodyErrorClassification 只锁状态码分类，此处锁"触帽不产生
+// 任何导出文件"（防异常大流量悄悄写满磁盘）。
+func TestOversizedBody413(t *testing.T) {
+	s, out := newTestServer(t, "A", "B")
+	big := strings.Repeat("a", maxBody+1)
+	resp, err := http.Post(s.Base()+"/api/agents", "application/json", strings.NewReader(big))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("超帽应 413: %d", resp.StatusCode)
+	}
+	if n := dumpCount(t, out); n != 0 {
+		t.Fatalf("超帽请求不应落盘: %d 个文件", n)
+	}
+	if recs := s.Records(); len(recs) != 0 {
+		t.Fatalf("超帽请求不应登记 Record: %+v", recs)
+	}
+	if s.DumpError() != nil {
+		t.Fatalf("超帽拒绝不应误记 dump 失败: %v", s.DumpError())
+	}
+}
+
+// TestConcurrentRequests 攻击用例：20 个并发 register——序号/agentID 自增
+// 与落盘必须在锁保护下无竞态：落盘文件数恰 20、响应 id 全唯一且非零、
+// Records 数 20 且 seq 两两不同（go test -race 下验证数据竞争）。
+func TestConcurrentRequests(t *testing.T) {
+	s, out := newTestServer(t, "A", "B")
+	const n = 20
+	var wg sync.WaitGroup
+	ids := make(chan int64, n)
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			body := fmt.Sprintf(`{"name":"agent-%02d"}`, i)
+			resp, err := http.Post(s.Base()+"/api/agents", "application/json", strings.NewReader(body))
+			if err != nil {
+				errs <- err
+				return
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				errs <- fmt.Errorf("并发请求 %d status = %d", i, resp.StatusCode)
+				return
+			}
+			var out struct {
+				ID int64 `json:"id"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+				errs <- fmt.Errorf("并发请求 %d 响应解析失败: %w", i, err)
+				return
+			}
+			ids <- out.ID
+		}(i)
+	}
+	wg.Wait()
+	close(ids)
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+	seen := map[int64]bool{}
+	for id := range ids {
+		if id <= 0 {
+			t.Fatalf("并发下 id 应非零: %d", id)
+		}
+		if seen[id] {
+			t.Fatalf("并发下 id 应唯一: %d 重复", id)
+		}
+		seen[id] = true
+	}
+	if len(seen) != n {
+		t.Fatalf("应收回 %d 个 id，实收 %d", n, len(seen))
+	}
+	// 落盘文件数与 Record 数
+	if got := dumpCount(t, out); got != n {
+		t.Fatalf("落盘文件应恰 %d 个: %d", n, got)
+	}
+	recs := s.Records()
+	if len(recs) != n {
+		t.Fatalf("Records 应恰 %d 条: %d", n, len(recs))
+	}
+	seqSeen := map[int]bool{}
+	for _, r := range recs {
+		if r.Seq <= 0 || seqSeen[r.Seq] {
+			t.Fatalf("Record seq 应唯一非零: %+v", r)
+		}
+		seqSeen[r.Seq] = true
 	}
 }
 
